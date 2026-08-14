@@ -1,0 +1,43 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.2",
+	"FriendlyName": "Aqueduct",
+	"Description": "Procedural material engine. Live-linked to the Aqueduct editor, GPU texture generation in-editor and in shipped games.",
+	"Category": "Textures",
+	"CreatedBy": "Iliad",
+	"EnabledByDefault": false,
+	"CanContainContent": false,
+	"Plugins": [
+		{
+			"Name": "WebSocketNetworking",
+			"Enabled": true
+		},
+		{
+			"Name": "DataValidation",
+			"Enabled": true
+		}
+	],
+	"Modules": [
+		{
+			"Name": "AqueductRuntime",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit",
+			"PlatformAllowList": [
+				"Linux",
+				"Mac",
+				"Win64"
+			]
+		},
+		{
+			"Name": "AqueductEditor",
+			"Type": "Editor",
+			"LoadingPhase": "PostDefault",
+			"PlatformAllowList": [
+				"Linux",
+				"Mac",
+				"Win64"
+			]
+		}
+	]
+}

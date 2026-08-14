@@ -1,0 +1,6 @@
+// Aqueduct dynamic node shader template.
+// The actual node code is injected via IncludeVirtualPathToContentsMap at compile time.
+// Each node permutation gets different HLSL injected into the virtual include.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/Aqueduct/Generated/NodeBody.ush"

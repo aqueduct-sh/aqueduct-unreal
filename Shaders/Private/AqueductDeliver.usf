@@ -1,0 +1,281 @@
+// Aqueduct delivery chain: float graph outputs → the uncompressed bytes every
+// live/dynamic texture is sampled in (and the bake reads back).
+//
+// Stage 1 (Pack*CS): quantize float pixels into the exact bytes the baked
+//   asset's Source will hold. The quantization math — floor(v*Steps+0.5),
+//   i.e. round-half-up on saturated values — REPLICATES THE CORE's
+//   float→integer conversion (crates/engine/src/texture.rs) byte for byte,
+//   so live pixels, baked Source, and CLI PNG exports are all the same
+//   quantization of the same float data.
+// Stage 2 (Downsample*CS): box-filter mip generation on the QUANTIZED data
+//   (mirroring the engine's build, which mips from the 8/16-bit Source),
+//   re-quantizing each level.
+//
+// The CPU side then copies the packed mip chain into the asset's uncompressed
+// live texture. The cooked STATIC asset is block-compressed (BC7/BC5/BC4) by
+// the engine's Oodle build from these same Source bytes — there is no realtime
+// BC encode (dynamic content is recomputed every frame, so compressing it would
+// only cost a pass and quality, and there is no realtime BC7).
+//
+// ORM packing follows the UE convention: R=AO, G=Roughness, B=Metallic.
+// Missing graph outputs fill with the engine-neutral values AO=1,
+// Roughness=0.5, Metallic=0.
+
+#include "/Engine/Public/Platform.ush"
+
+Texture2D<float4> InputA;   // primary output (or AO for ORM)
+Texture2D<float4> InputB;   // roughness (ORM only)
+Texture2D<float4> InputC;   // metallic  (ORM only)
+uint PresenceMask;          // ORM: bit0=AO, bit1=roughness, bit2=metallic
+uint bReplicateR;           // core expansion-swizzle contract: single-channel
+                            // sources present as (r,r,r,1), never (r,0,0,1)
+uint bFlipGreen;            // normals only: graph declares OpenGL (Y-up) but UE
+                            // materials sample DirectX (Y-down), so delivery
+                            // inverts G. DirectX graphs pass through.
+
+Texture2D<float4> SrcMip;   // downsample/encode source (single-mip SRV)
+Texture2D<float>  SrcMipGray;
+
+RWTexture2D<float4> OutPacked;
+RWTexture2D<float>  OutPackedGray;
+
+// Core-identical quantization: round-half-up at S steps, stored as the
+// exact representable value so the unorm conversion on UAV write is lossless.
+float QuantizeCore(float V, float S)
+{
+    return floor(saturate(V) * S + 0.5) / S;
+}
+float4 QuantizeCore4(float4 V, float S)
+{
+    return float4(QuantizeCore(V.x, S), QuantizeCore(V.y, S),
+                  QuantizeCore(V.z, S), QuantizeCore(V.w, S));
+}
+
+uint2 PackedDims()
+{
+    uint2 Dims;
+    OutPacked.GetDimensions(Dims.x, Dims.y);
+    return Dims;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1: pack
+// ---------------------------------------------------------------------------
+
+// Color images (albedo, generic color outputs): the float data is
+// display-referred by core contract, so the stored bytes are the values
+// as-is — the asset's SRGB flag makes sampling decode them, exactly like a
+// PNG an artist imported.
+[numthreads(16, 16, 1)]
+void PackColorCS(uint3 DTid : SV_DispatchThreadID)
+{
+    uint2 Dims = PackedDims();
+    if (DTid.x >= Dims.x || DTid.y >= Dims.y) return;
+    float4 V = InputA.Load(int3(DTid.xy, 0));
+    if (bReplicateR != 0) V = float4(V.r, V.r, V.r, 1.0);
+    OutPacked[DTid.xy] = QuantizeCore4(float4(V.rgb, 1.0), 255.0);
+}
+
+[numthreads(16, 16, 1)]
+void PackOrmCS(uint3 DTid : SV_DispatchThreadID)
+{
+    uint2 Dims = PackedDims();
+    if (DTid.x >= Dims.x || DTid.y >= Dims.y) return;
+    // Grayscale outputs read .r by core contract (single-channel data is
+    // replicated, never (r,0,0,1)).
+    float AO    = (PresenceMask & 1u) ? InputA.Load(int3(DTid.xy, 0)).r : 1.0;
+    float Rough = (PresenceMask & 2u) ? InputB.Load(int3(DTid.xy, 0)).r : 0.5;
+    float Metal = (PresenceMask & 4u) ? InputC.Load(int3(DTid.xy, 0)).r : 0.0;
+    OutPacked[DTid.xy] = QuantizeCore4(float4(AO, Rough, Metal, 1.0), 255.0);
+}
+
+// Normals: 16-bit/channel so the only 8-bit quantization is the BC5
+// encoder's own endpoint fit (quantize once, not twice). Unsigned [0,1]
+// XYZ exactly as a 16-bit normal PNG would carry.
+[numthreads(16, 16, 1)]
+void PackNormalCS(uint3 DTid : SV_DispatchThreadID)
+{
+    uint2 Dims = PackedDims();
+    if (DTid.x >= Dims.x || DTid.y >= Dims.y) return;
+    float4 V = InputA.Load(int3(DTid.xy, 0));
+    if (bReplicateR != 0) V = float4(V.r, V.r, V.r, 1.0);
+    if (bFlipGreen != 0) V.g = 1.0 - V.g;
+    // The graph's normal output is two-channel (the expansion swizzle copies
+    // R into B); the saved Source must be a real XYZ normal map, and the
+    // engine's bNormalizeNormals / roughness-composite math needs true Z.
+    float2 N = V.rg * 2.0f - 1.0f;
+    float Z = sqrt(saturate(1.0f - dot(N, N)));
+    OutPacked[DTid.xy] = QuantizeCore4(float4(V.rg, Z * 0.5f + 0.5f, 1.0), 65535.0);
+}
+
+// 8-bit (G8 / cooked BC4) by contract — gray maps are height/single-channel.
+// True 16-bit displacement that bands would need an uncompressed R16 source
+// (see AqueductTexture::ApplyDeliverySettings); it is not a 65535-step quantize
+// here, since the packed format and the cooked format are both 8-bit.
+[numthreads(16, 16, 1)]
+void PackGrayCS(uint3 DTid : SV_DispatchThreadID)
+{
+    uint2 Dims;
+    OutPackedGray.GetDimensions(Dims.x, Dims.y);
+    if (DTid.x >= Dims.x || DTid.y >= Dims.y) return;
+    OutPackedGray[DTid.xy] = QuantizeCore(InputA.Load(int3(DTid.xy, 0)).r, 255.0);
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: mips (2x2 box on quantized data, re-quantized per level)
+// ---------------------------------------------------------------------------
+
+float QuantSteps;  // 255 (8-bit) or 65535 (16-bit)
+uint2 OutDims;     // mip dims being written (output may be a larger scratch:
+                   // same-texture SRV+UAV would need per-mip barriers, which
+                   // the RHI command list's tracked transitions don't allow —
+                   // levels ping-pong through scratch with whole-resource
+                   // barriers and a per-mip COPY instead)
+
+[numthreads(16, 16, 1)]
+void DownsampleCS(uint3 DTid : SV_DispatchThreadID)
+{
+    if (DTid.x >= OutDims.x || DTid.y >= OutDims.y) return;
+    int2 S = int2(DTid.xy) * 2;
+    float4 V = (SrcMip.Load(int3(S, 0)) + SrcMip.Load(int3(S + int2(1, 0), 0)) +
+                SrcMip.Load(int3(S + int2(0, 1), 0)) + SrcMip.Load(int3(S + int2(1, 1), 0))) * 0.25;
+    OutPacked[DTid.xy] = QuantizeCore4(V, QuantSteps);
+}
+
+// ---------------------------------------------------------------------------
+// Normal-to-roughness composite for ORM mips (CTM_NormalRoughnessToGreen),
+// replicating the engine's CompositeTexture build exactly so the live
+// delivery matches the cooked asset: normal top mip renormalized then
+// Gaussian-blurred (GenerateTopMip), chain Gaussian-downsampled without
+// renormalization, each clean roughness mip composited once. The filters
+// commute with the 0.5-offset encoding, so the chain runs in signed space.
+// ---------------------------------------------------------------------------
+Texture2D<float4> BlurSrcPacked;
+Texture2D<float4> BlurSrcSigned;
+RWTexture2D<float4> BlurOutSigned;
+uint2 BlurDims;
+
+// GenerateTopMip kernel: 7 centered taps, exp(-x^2/7), normalized.
+static const float AqueductGaussW[7] = {
+    0.06260120f, 0.12787717f, 0.19629951f, 0.22644424f,
+    0.19629951f, 0.12787717f, 0.06260120f
+};
+
+[numthreads(16, 16, 1)]
+void CompositeBlurHCS(uint3 DTid : SV_DispatchThreadID)
+{
+    if (DTid.x >= BlurDims.x || DTid.y >= BlurDims.y) return;
+    float3 Acc = float3(0.0f, 0.0f, 0.0f);
+    for (int i = -3; i <= 3; ++i)
+    {
+        uint X = uint(int(DTid.x) + i + int(BlurDims.x)) % BlurDims.x;
+        float3 N = BlurSrcPacked.Load(int3(int(X), int(DTid.y), 0)).rgb * 2.0f - 1.0f;
+        float L = length(N);
+        N = (L > 0.0f) ? N / L : float3(0.0f, 0.0f, 1.0f);
+        Acc += AqueductGaussW[i + 3] * N;
+    }
+    BlurOutSigned[DTid.xy] = float4(Acc, 0.0f);
+}
+
+[numthreads(16, 16, 1)]
+void CompositeBlurVCS(uint3 DTid : SV_DispatchThreadID)
+{
+    if (DTid.x >= BlurDims.x || DTid.y >= BlurDims.y) return;
+    float3 Acc = float3(0.0f, 0.0f, 0.0f);
+    for (int i = -3; i <= 3; ++i)
+    {
+        uint Y = uint(int(DTid.y) + i + int(BlurDims.y)) % BlurDims.y;
+        Acc += AqueductGaussW[i + 3] * BlurSrcSigned.Load(int3(int(DTid.x), int(Y), 0)).rgb;
+    }
+    BlurOutSigned[DTid.xy] = float4(Acc, 0.0f);
+}
+
+// Chain downsample kernel: the engine downsamples the composite chain with a
+// Gaussian, not a 2x2 box (GenerateMipChain, SharpenMipKernelSize=6,
+// MipSharpening=-3.5): 6 taps at offsets -2..+3 around 2*dest, normalized.
+static const float AqueductGaussDownW[6] = {
+    0.09751886f, 0.17268590f, 0.22979524f, 0.22979524f, 0.17268590f, 0.09751886f
+};
+
+[numthreads(16, 16, 1)]
+void CompositeChainDownCS(uint3 DTid : SV_DispatchThreadID)
+{
+    if (DTid.x >= BlurDims.x || DTid.y >= BlurDims.y) return;
+    uint SrcW = BlurDims.x * 2;
+    uint SrcH = BlurDims.y * 2;
+    float4 Acc = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    for (int ky = 0; ky < 6; ++ky)
+    {
+        uint Y = uint(int(DTid.y) * 2 + ky - 2 + int(SrcH)) % SrcH;
+        for (int kx = 0; kx < 6; ++kx)
+        {
+            uint X = uint(int(DTid.x) * 2 + kx - 2 + int(SrcW)) % SrcW;
+            Acc += (AqueductGaussDownW[kx] * AqueductGaussDownW[ky]) *
+                   BlurSrcSigned.Load(int3(int(X), int(Y), 0));
+        }
+    }
+    BlurOutSigned[DTid.xy] = Acc;
+}
+
+// Normal mip renormalization (bNormalizeNormals parity): the cooked build
+// normalizes every level of the unnormalized chain as a post-pass; this
+// rewrites each delivered level the same way, after the clean chain exists.
+Texture2D<float4> NormalizeSrc;
+RWTexture2D<float4> NormalizeOut;
+uint2 NormalizeDims;
+
+[numthreads(16, 16, 1)]
+void NormalizeNormalCS(uint3 DTid : SV_DispatchThreadID)
+{
+    if (DTid.x >= NormalizeDims.x || DTid.y >= NormalizeDims.y) return;
+    float4 V = NormalizeSrc.Load(int3(DTid.xy, 0));
+    float3 N = V.rgb * 2.0f - 1.0f;
+    float L2 = dot(N, N);
+    N = (L2 > 1e-8f) ? N * rsqrt(L2) : float3(0.0f, 0.0f, 1.0f);
+    NormalizeOut[DTid.xy] = QuantizeCore4(float4(N * 0.5f + 0.5f, V.a), 65535.0);
+}
+
+Texture2D<float4> CompositeOrmSrc;
+Texture2D<float4> CompositeNormalMip;
+RWTexture2D<float4> CompositeOrm;
+uint2 CompositeDims;
+float CompositePower;
+
+float AqueductCompositeNormalLengthToRoughness(float LengthN, float Roughness, float Power)
+{
+    float Variance = (1.0f - LengthN) / LengthN;
+    Variance = Variance - 0.00004f;
+    if (Variance <= 0.0f)
+    {
+        return Roughness;
+    }
+    Variance *= Power;
+    float a = Roughness * Roughness;
+    float a2 = a * a;
+    float B = 2.0f * Variance * (a2 - 1.0f);
+    a2 = (B - a2) / (B - 1.0f);
+    return pow(a2, 0.25f);
+}
+
+[numthreads(16, 16, 1)]
+void CompositeOrmRoughnessCS(uint3 DTid : SV_DispatchThreadID)
+{
+    if (DTid.x >= CompositeDims.x || DTid.y >= CompositeDims.y) return;
+    float4 Orm = CompositeOrmSrc.Load(int3(DTid.xy, 0));
+    float3 N = CompositeNormalMip.Load(int3(DTid.xy, 0)).rgb;
+    float LengthN = min(length(N), 1.0f);
+    Orm.g = QuantizeCore(
+        AqueductCompositeNormalLengthToRoughness(LengthN, Orm.g, CompositePower), 255.0);
+    CompositeOrm[DTid.xy] = Orm;
+}
+
+[numthreads(16, 16, 1)]
+void DownsampleGrayCS(uint3 DTid : SV_DispatchThreadID)
+{
+    if (DTid.x >= OutDims.x || DTid.y >= OutDims.y) return;
+    int2 S = int2(DTid.xy) * 2;
+    float V = (SrcMipGray.Load(int3(S, 0)) + SrcMipGray.Load(int3(S + int2(1, 0), 0)) +
+               SrcMipGray.Load(int3(S + int2(0, 1), 0)) + SrcMipGray.Load(int3(S + int2(1, 1), 0))) * 0.25;
+    OutPackedGray[DTid.xy] = QuantizeCore(V, 255.0);
+}
+

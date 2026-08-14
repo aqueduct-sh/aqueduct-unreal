@@ -1,0 +1,33 @@
+// Mipmap generation: 2x2 box-filter downsample.
+// Reads from source mip level, writes to destination mip level at half resolution.
+
+#include "/Engine/Public/Platform.ush"
+
+Texture2D SrcMip;
+RWTexture2D<float4> DstMip;
+Texture2D<float> SrcMipR32;
+RWTexture2D<float> DstMipR32;
+
+[numthreads(16, 16, 1)]
+void MipGenCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    int2 DstCoord = int2(DispatchThreadId.xy);
+    int2 SrcCoord = DstCoord * 2;
+    float4 A = SrcMip.Load(int3(SrcCoord, 0));
+    float4 B = SrcMip.Load(int3(SrcCoord + int2(1, 0), 0));
+    float4 C = SrcMip.Load(int3(SrcCoord + int2(0, 1), 0));
+    float4 D = SrcMip.Load(int3(SrcCoord + int2(1, 1), 0));
+    DstMip[DstCoord] = (A + B + C + D) * 0.25;
+}
+
+[numthreads(16, 16, 1)]
+void MipGenR32CS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    int2 DstCoord = int2(DispatchThreadId.xy);
+    int2 SrcCoord = DstCoord * 2;
+    float A = SrcMipR32.Load(int3(SrcCoord, 0));
+    float B = SrcMipR32.Load(int3(SrcCoord + int2(1, 0), 0));
+    float C = SrcMipR32.Load(int3(SrcCoord + int2(0, 1), 0));
+    float D = SrcMipR32.Load(int3(SrcCoord + int2(1, 1), 0));
+    DstMipR32[DstCoord] = (A + B + C + D) * 0.25;
+}

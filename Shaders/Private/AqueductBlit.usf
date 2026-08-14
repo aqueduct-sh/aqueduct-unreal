@@ -1,0 +1,29 @@
+// Blit compute shader: copies a texture to a UAV via Load().
+// Handles any source format (R8G8B8A8, FloatRGBA, R32Float, etc.)
+// since Load() returns float4 regardless of source format.
+//
+// bReplicateR implements the core's expansion-swizzle convention for
+// single-channel sources: grayscale BY CONTRACT — the RGBA presentation of
+// R32Float data is (r, r, r, 1), never (r, 0, 0, 1). The flag is set from
+// the core convention (aqueduct_expansion_swizzle), not decided here.
+
+#include "/Engine/Public/Platform.ush"
+
+Texture2D<float4> InputTexture;
+RWTexture2D<float4> OutputTexture;
+uint bReplicateR;
+
+[numthreads(16, 16, 1)]
+void BlitCS(uint3 DTid : SV_DispatchThreadID)
+{
+    uint2 Dims;
+    OutputTexture.GetDimensions(Dims.x, Dims.y);
+    if (DTid.x >= Dims.x || DTid.y >= Dims.y) return;
+
+    float4 Color = InputTexture.Load(int3(DTid.xy, 0));
+    if (bReplicateR != 0)
+    {
+        Color = float4(Color.r, Color.r, Color.r, 1.0);
+    }
+    OutputTexture[DTid.xy] = Color;
+}

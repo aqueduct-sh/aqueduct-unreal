@@ -1,0 +1,17 @@
+// AqueductCompute.usf — Aqueduct proof-of-life compute shader.
+//
+// Writes solid red to a UAV texture. Used to validate the full
+// UE shader compilation + GPU dispatch pipeline.
+
+#include "/Engine/Public/Platform.ush"
+
+RWTexture2D<float4> OutputTexture;
+
+[numthreads(16, 16, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	uint Width, Height;
+	OutputTexture.GetDimensions(Width, Height);
+	if (DispatchThreadId.x >= Width || DispatchThreadId.y >= Height) return;
+	OutputTexture[DispatchThreadId.xy] = float4(1.0, 0.0, 0.0, 1.0);
+}

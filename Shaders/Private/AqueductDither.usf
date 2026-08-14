@@ -1,0 +1,26 @@
+// Blue-noise dithered float16 → rgba8 conversion.
+// Adds ±0.5 LSB dither per R,G,B channel independently. No dither on alpha.
+// Blue noise texture: 64x64 RGBA8, tiled across the output.
+
+#include "/Engine/Public/Platform.ush"
+
+Texture2D InputTexture;
+RWTexture2D<float4> OutputTexture;
+Texture2D BlueNoiseTexture;
+
+[numthreads(16, 16, 1)]
+void DitherCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    float4 Color = InputTexture[DispatchThreadId.xy];
+
+    uint2 NoiseCoord = DispatchThreadId.xy % 64u;
+    float4 Noise = BlueNoiseTexture[NoiseCoord];
+
+    float3 Dither = (Noise.rgb - 0.5) / 255.0;
+    OutputTexture[DispatchThreadId.xy] = float4(
+        saturate(Color.r + Dither.r),
+        saturate(Color.g + Dither.g),
+        saturate(Color.b + Dither.b),
+        saturate(Color.a)
+    );
+}
