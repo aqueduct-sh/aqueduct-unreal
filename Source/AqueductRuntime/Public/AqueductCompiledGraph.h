@@ -96,13 +96,11 @@ struct FCompiledMipChain
 	uint32 SourceNodeIndex = 0;
 };
 
-/** Format conversion entry for multi-pass nodes.
- *  After all passes complete in rgba32float, this copies the result
- *  to the node's actual output texture format. */
+/** One semantic output conversion for a multi-pass node. */
 struct FCompiledFormatConvert
 {
-	FTextureRHIRef SrcTexture;   // last-written ping/pong (rgba32float)
-	FTextureRHIRef DstTexture;   // node's actual output texture
+	FTextureRHIRef SrcTexture;   // primary ping/pong or secondary staging (rgba32float)
+	FTextureRHIRef DstTexture;   // semantic's actual output texture
 	uint32 Resolution = 0;
 	uint32 NodeIndex = 0;
 };

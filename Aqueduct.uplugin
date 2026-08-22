@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "0.1.2",
+	"VersionName": "0.1.3",
 	"FriendlyName": "Aqueduct",
 	"Description": "Procedural material engine. Live-linked to the Aqueduct editor, GPU texture generation in-editor and in shipped games.",
 	"Category": "Textures",

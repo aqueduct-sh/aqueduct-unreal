@@ -298,11 +298,35 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			Node->TryGetStringField(TEXT("kind"), Entry.Kind);
 			Node->TryGetStringField(TEXT("format"), Entry.Format);
 			Node->TryGetStringField(TEXT("compute_format"), Entry.ComputeFormat);
+			const TSharedPtr<FJsonObject>* Formats = nullptr;
+			if (Node->TryGetObjectField(TEXT("formats"), Formats))
+			{
+				for (const auto& Pair : (*Formats)->Values)
+				{
+					Entry.Formats.Add(Pair.Key, Pair.Value->AsString());
+				}
+			}
+			const TSharedPtr<FJsonObject>* ComputeFormats = nullptr;
+			if (Node->TryGetObjectField(TEXT("compute_formats"), ComputeFormats))
+			{
+				for (const auto& Pair : (*ComputeFormats)->Values)
+				{
+					Entry.ComputeFormats.Add(Pair.Key, Pair.Value->AsString());
+				}
+			}
 			Node->TryGetStringField(TEXT("definition_hash"), Entry.DefinitionHash);
 			double Passes = 1.0;
 			Node->TryGetNumberField(TEXT("passes"), Passes);
 			Entry.Passes = FMath::Max(1u, (uint32)Passes);
 			Node->TryGetBoolField(TEXT("dither_8bit"), Entry.bDither8Bit);
+			const TSharedPtr<FJsonObject>* DitherOutputs = nullptr;
+			if (Node->TryGetObjectField(TEXT("dither_8bit_outputs"), DitherOutputs))
+			{
+				for (const auto& Pair : (*DitherOutputs)->Values)
+				{
+					Entry.Dither8BitOutputs.Add(Pair.Key, Pair.Value->AsBool());
+				}
+			}
 			const TArray<TSharedPtr<FJsonValue>>* Outputs = nullptr;
 			if (Node->TryGetArrayField(TEXT("outputs"), Outputs))
 			{
@@ -314,6 +338,12 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			if (Entry.Outputs.IsEmpty())
 			{
 				Entry.Outputs.Add(TEXT("output"));
+			}
+			for (const FString& Semantic : Entry.Outputs)
+			{
+				if (!Entry.Formats.Contains(Semantic)) Entry.Formats.Add(Semantic, Entry.Format);
+				if (!Entry.ComputeFormats.Contains(Semantic)) Entry.ComputeFormats.Add(Semantic, Entry.ComputeFormat);
+				if (!Entry.Dither8BitOutputs.Contains(Semantic)) Entry.Dither8BitOutputs.Add(Semantic, Entry.bDither8Bit);
 			}
 
 			const TSharedPtr<FJsonObject>* Inputs = nullptr;
@@ -424,9 +454,17 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 		for (const auto& Pair : PlanNodes)
 		{
 			const FExecutionPlanNode& P = Pair.Value;
-			PredictedResidentBytes += ResPx * FormatBpp(P.ComputeFormat);
+			for (const FString& Semantic : P.Outputs)
+			{
+				const FString* ComputeFormat = P.ComputeFormats.Find(Semantic);
+				PredictedResidentBytes += ResPx * FormatBpp(ComputeFormat ? *ComputeFormat : P.ComputeFormat);
+			}
 			if (P.bDither8Bit) PredictedResidentBytes += ResPx * 4;
-			if (P.Passes > 1) PredictedResidentBytes += 2 * ResPx * 16;
+			if (P.Passes > 1)
+			{
+				PredictedResidentBytes += 2 * ResPx * 16;
+				PredictedResidentBytes += uint64(FMath::Max(P.Outputs.Num() - 1, 0)) * ResPx * 16;
+			}
 		}
 		for (const FString& SourceKey : MipRequiredTextureKeys)
 		{
@@ -437,7 +475,11 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 				ProducerId = ProducerId.Left(DotIndex);
 			}
 			const FExecutionPlanNode* Producer = PlanNodes.Find(ProducerId);
-			const uint64 Bpp = FormatBpp(Producer ? Producer->ComputeFormat : TEXT("rgba16float"));
+			FString Semantic = TEXT("output");
+			int32 SemanticDot = INDEX_NONE;
+			if (SourceKey.FindChar(TEXT('.'), SemanticDot)) Semantic = SourceKey.Mid(SemanticDot + 1);
+			const FString* ProducerFormat = Producer ? Producer->ComputeFormats.Find(Semantic) : nullptr;
+			const uint64 Bpp = FormatBpp(ProducerFormat ? *ProducerFormat : (Producer ? Producer->ComputeFormat : TEXT("rgba16float")));
 			uint32 Side = GetResolution();
 			while (Side > 1)
 			{

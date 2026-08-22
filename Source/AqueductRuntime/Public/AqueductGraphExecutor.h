@@ -408,6 +408,8 @@ private:
 		FString Kind;
 		FString Format;        // resolved output format token
 		FString ComputeFormat; // compute-texture format (narrow formats compute wide)
+		TMap<FString, FString> Formats;        // semantic -> destination format
+		TMap<FString, FString> ComputeFormats; // semantic -> dispatch format
 		uint32 Passes = 1;
 		TArray<FString> Outputs;
 		TMap<FString, FString> Inputs; // semantic -> resolved source texture key
@@ -415,6 +417,7 @@ private:
 		TArray<FString> MipmappedInputs;
 		TMap<FString, FScratchDeclInfo> Scratch; // keyed by scratch name
 		bool bDither8Bit = false;
+		TMap<FString, bool> Dither8BitOutputs;
 		FString DefinitionHash;
 	};
 

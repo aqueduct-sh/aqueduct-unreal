@@ -261,21 +261,26 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 				}
 			}
 
-			// Build output UAVs — for multi-pass, ALL passes write to ping/pong.
-			// The engine appends a format conversion copy after all passes.
+			// Multi-pass outputs write to rgba32 staging: shared ping/pong for the
+			// primary semantic and one stable staging texture per secondary.
 			bool bMultiOutput = SD->OutputSemantics.Num() > 1;
 			for (int32 i = 0; i < SD->OutputSemantics.Num() && i < MAX_NODE_OUTPUTS; i++)
 			{
 				FString TexKey;
-				if (TotalPasses > 1 && i == 0)
+				if (TotalPasses > 1)
 				{
-					// Multi-pass output routing: all passes to the shared ping/pong
-					FString PingKey = GSharedPingKey;
-					FString PongKey = GSharedPongKey;
-					if (PassIdx == 0)
-						TexKey = PingKey;
+					if (i == 0)
+					{
+						// The primary output rotates through shared ping/pong.
+						if (PassIdx == 0)
+							TexKey = GSharedPingKey;
+						else
+							TexKey = (PassIdx % 2 == 1) ? GSharedPongKey : GSharedPingKey;
+					}
 					else
-						TexKey = (PassIdx % 2 == 1) ? PongKey : PingKey;
+					{
+						TexKey = NodeId + TEXT(".__stage_") + SD->OutputSemantics[i];
+					}
 				}
 				else
 				{
@@ -377,28 +382,31 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 
 		CG->NodeDispatchRanges.Add(TPair<uint32, uint32>(DispatchStart, CG->Dispatches.Num()));
 
-		// Build format conversion entry for multi-pass nodes
+		// Build one format conversion entry per multi-pass semantic.
 		if (SD->Passes > 1)
 		{
 			FString PingKey = GSharedPingKey;
 			FString PongKey = GSharedPongKey;
-			FString LastWrittenKey = (SD->Passes % 2 == 0) ? PongKey : PingKey;
-			FString PrimaryOutputKey = NodeId;
-			if (SD->OutputSemantics.Num() > 1 && SD->OutputSemantics.Num() > 0)
+			const FString PrimaryStageKey = (SD->Passes % 2 == 0) ? PongKey : PingKey;
+			const bool bMultiOutput = SD->OutputSemantics.Num() > 1;
+			for (int32 OutputIndex = 0; OutputIndex < SD->OutputSemantics.Num(); ++OutputIndex)
 			{
-				PrimaryOutputKey = NodeId + TEXT(".") + SD->OutputSemantics[0];
-			}
-
-			FAqueductTexture* SrcEntry = NodeTextures.Find(ResolvePoolKey(LastWrittenKey));
-			FAqueductTexture* DstEntry = NodeTextures.Find(ResolvePoolKey(PrimaryOutputKey));
-			if (SrcEntry && DstEntry && SrcEntry->Texture.IsValid() && DstEntry->Texture.IsValid())
-			{
-				FCompiledFormatConvert FC;
-				FC.SrcTexture = SrcEntry->Texture;
-				FC.DstTexture = DstEntry->Texture;
-				FC.Resolution = Resolution;
-				FC.NodeIndex = NodeIdx;
-				CG->FormatConverts.Add(MoveTemp(FC));
+				const FString& Semantic = SD->OutputSemantics[OutputIndex];
+				const FString SourceKey = OutputIndex == 0
+					? PrimaryStageKey
+					: NodeId + TEXT(".__stage_") + Semantic;
+				const FString DestinationKey = bMultiOutput ? NodeId + TEXT(".") + Semantic : NodeId;
+				FAqueductTexture* SrcEntry = NodeTextures.Find(ResolvePoolKey(SourceKey));
+				FAqueductTexture* DstEntry = NodeTextures.Find(ResolvePoolKey(DestinationKey));
+				if (SrcEntry && DstEntry && SrcEntry->Texture.IsValid() && DstEntry->Texture.IsValid())
+				{
+					FCompiledFormatConvert FC;
+					FC.SrcTexture = SrcEntry->Texture;
+					FC.DstTexture = DstEntry->Texture;
+					FC.Resolution = Resolution;
+					FC.NodeIndex = NodeIdx;
+					CG->FormatConverts.Add(MoveTemp(FC));
+				}
 			}
 		}
 	}
@@ -559,16 +567,15 @@ void FAqueductGraphExecutor::ReplayCompiledGraph(FRHICommandListImmediate& RHICm
 		RHICmdList.EndRenderQuery(GraphProfileStartQuery);
 	}
 
-	// Multi-pass format-converts read the SHARED ping/pong pair, so each must
-	// run immediately after its source node's last pass — before another
-	// multipass node's dispatches overwrite the pair. Map node → convert and
-	// flush at segment boundaries; the batch loop after the dispatches
-	// catches any not flushed here.
-	TArray<int32> ConvertIndexByNode;
-	ConvertIndexByNode.Init(-1, CG.Nodes.Num());
+	// Multi-pass format-converts include the SHARED primary ping/pong pair, so
+	// they run immediately after their source node's last pass, before another
+	// multipass node overwrites it. Map each node to all semantic conversions;
+	// the batch loop after the dispatches catches any not flushed here.
+	TArray<TArray<int32>> ConvertIndicesByNode;
+	ConvertIndicesByNode.SetNum(CG.Nodes.Num());
 	for (int32 FCIdx = 0; FCIdx < CG.FormatConverts.Num(); FCIdx++)
 	{
-		ConvertIndexByNode[CG.FormatConverts[FCIdx].NodeIndex] = FCIdx;
+		ConvertIndicesByNode[CG.FormatConverts[FCIdx].NodeIndex].Add(FCIdx);
 	}
 	TArray<bool> ConvertIssued;
 	ConvertIssued.Init(false, CG.FormatConverts.Num());
@@ -604,10 +611,9 @@ void FAqueductGraphExecutor::ReplayCompiledGraph(FRHICommandListImmediate& RHICm
 		{
 			return;
 		}
-		const int32 ConvertIdx = ConvertIndexByNode[NodeIdx];
-		if (ConvertIdx >= 0 && !ConvertIssued[ConvertIdx])
+		for (const int32 ConvertIdx : ConvertIndicesByNode[NodeIdx])
 		{
-			IssueFormatConvert(ConvertIdx);
+			if (!ConvertIssued[ConvertIdx]) IssueFormatConvert(ConvertIdx);
 		}
 		for (const FCompiledMipChain& Chain : CG.MipChains)
 		{
@@ -809,7 +815,10 @@ void FAqueductGraphExecutor::ReplayCompiledGraph(FRHICommandListImmediate& RHICm
 	for (const auto& FmtPair : ResolvedFormats)
 	{
 		if (FmtPair.Value != TEXT("rgba8unorm")) continue;
-		const uint32* NodeIdx = CG.NodeIdToIndex.Find(FmtPair.Key);
+		FString ProducerId = FmtPair.Key;
+		int32 DotIndex = INDEX_NONE;
+		if (ProducerId.FindChar(TEXT('.'), DotIndex)) ProducerId = ProducerId.Left(DotIndex);
+		const uint32* NodeIdx = CG.NodeIdToIndex.Find(ProducerId);
 		if (!NodeIdx || !CG.NodeDirty[*NodeIdx]) continue;
 
 		FString ConvKey = TEXT("_dither_") + FmtPair.Key;

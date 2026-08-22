@@ -292,30 +292,31 @@ void FAqueductGraphExecutor::ExecuteFull(FRHICommandListImmediate& RHICmdList)
 	for (const FString& NodeId : ExecutionOrder)
 	{
 		const FExecutionPlanNode& Plan = PlanNodes[NodeId];
-		ResolvedFormats.Add(NodeId, Plan.Format);
-
-		const FNodeShaderData* ShaderData = bShadersCompiled ? NodeShaders.Find(NodeId) : nullptr;
-		if (ShaderData && ShaderData->OutputSemantics.Num() > 1)
+		const bool bMultiOutput = Plan.Outputs.Num() > 1;
+		for (const FString& OutSem : Plan.Outputs)
 		{
-			for (const FString& OutSem : ShaderData->OutputSemantics)
-			{
-				const FString TextureKey = NodeId + TEXT(".") + OutSem;
-				GetOrCreateNodeTexture(TextureKey, Plan.ComputeFormat, Resolution,
-					MipRequiredTextureKeys.Contains(TextureKey));
-			}
-		}
-		else
-		{
-			GetOrCreateNodeTexture(NodeId, Plan.ComputeFormat, Resolution,
-				MipRequiredTextureKeys.Contains(NodeId));
+			const FString TextureKey = bMultiOutput ? NodeId + TEXT(".") + OutSem : NodeId;
+			const FString* DestinationFormat = Plan.Formats.Find(OutSem);
+			const FString* ComputeFormat = Plan.ComputeFormats.Find(OutSem);
+			ResolvedFormats.Add(TextureKey, DestinationFormat ? *DestinationFormat : Plan.Format);
+			const FString& AllocationFormat = Plan.Passes > 1
+				? (DestinationFormat ? *DestinationFormat : Plan.Format)
+				: (ComputeFormat ? *ComputeFormat : Plan.ComputeFormat);
+			GetOrCreateNodeTexture(TextureKey, AllocationFormat,
+				Resolution, MipRequiredTextureKeys.Contains(TextureKey));
 		}
 
 		// The shared multi-pass ping/pong pair holds rgba32float intermediates;
 		// a format-convert blit lands each node's final format afterwards.
-		if (ShaderData && ShaderData->Passes > 1)
+		if (Plan.Passes > 1)
 		{
 			GetOrCreateNodeTexture(GSharedPingKey, TEXT("rgba32float"), Resolution);
 			GetOrCreateNodeTexture(GSharedPongKey, TEXT("rgba32float"), Resolution);
+			for (int32 OutputIndex = 1; OutputIndex < Plan.Outputs.Num(); ++OutputIndex)
+			{
+				GetOrCreateNodeTexture(NodeId + TEXT(".__stage_") + Plan.Outputs[OutputIndex],
+					TEXT("rgba32float"), Resolution);
+			}
 		}
 	}
 
@@ -530,8 +531,8 @@ void FAqueductGraphExecutor::ExecuteFull(FRHICommandListImmediate& RHICmdList)
 		{
 			NodeId = NodeId.Left(DotIdx);
 		}
-		const FExecutionPlanNode* Plan = PlanNodes.Find(NodeId);
-		if (Plan && Plan->Format == TEXT("rgba8unorm"))
+		const FString* ResolvedFormat = ResolvedFormats.Find(TextureKey);
+		if (ResolvedFormat && *ResolvedFormat == TEXT("rgba8unorm"))
 		{
 			const FString ConvKey = TEXT("_dither_") + TextureKey;
 			GetOrCreateNodeTexture(ConvKey, TEXT("rgba8unorm"), Resolution);
@@ -1208,11 +1209,7 @@ void FAqueductGraphExecutor::DispatchMultiPassNode(
 
 	FString PingKey = GSharedPingKey;
 	FString PongKey = GSharedPongKey;
-	FString PrimaryOutputKey = NodeId;
-	if (ShaderData.OutputSemantics.Num() > 1 && ShaderData.OutputSemantics.Num() > 0)
-	{
-		PrimaryOutputKey = NodeId + TEXT(".") + ShaderData.OutputSemantics[0];
-	}
+	const bool bMultiOutput = ShaderData.OutputSemantics.Num() > 1;
 
 	// Zero-fill all shared scratch slots this node declares before the first
 	// pass. Slots persist across passes within this node's execution but each
@@ -1276,17 +1273,28 @@ void FAqueductGraphExecutor::DispatchMultiPassNode(
 			break;
 		}
 
-		// Save original primary output texture and swap write target into that
-		// slot. Multi-output nodes store their primary output as "node.output",
-		// not "node", so routing must use the first output semantic.
-		FAqueductTexture SavedOutput;
-		bool bHadOriginal = false;
-		if (const FAqueductTexture* OrigPtr = NodeTextures.Find(ResolvePoolKey(PrimaryOutputKey)))
+		// Redirect every output to rgba32float staging for the duration of this
+		// pass. The primary rotates through shared ping/pong; secondary outputs
+		// retain one stable stage texture across the sequence.
+		TArray<TPair<FString, FAqueductTexture>> SavedOutputs;
+		for (int32 OutputIndex = 0; OutputIndex < ShaderData.OutputSemantics.Num(); ++OutputIndex)
 		{
-			SavedOutput = *OrigPtr;
-			bHadOriginal = true;
+			const FString& Semantic = ShaderData.OutputSemantics[OutputIndex];
+			const FString OutputKey = bMultiOutput ? NodeId + TEXT(".") + Semantic : NodeId;
+			const FString StageKey = OutputIndex == 0
+				? WriteKey
+				: NodeId + TEXT(".__stage_") + Semantic;
+			const FAqueductTexture* Original = NodeTextures.Find(ResolvePoolKey(OutputKey));
+			const FAqueductTexture* Stage = NodeTextures.Find(ResolvePoolKey(StageKey));
+			if (!Original || !Stage)
+			{
+				UE_LOG(LogAqueduct, Error, TEXT("  [%s] Missing output stage %s for pass %d"), *NodeId, *StageKey, Pass);
+				ensure(false);
+				return;
+			}
+			SavedOutputs.Emplace(ResolvePoolKey(OutputKey), *Original);
+			NodeTextures.Add(ResolvePoolKey(OutputKey), *Stage);
 		}
-		NodeTextures.Add(ResolvePoolKey(PrimaryOutputKey), WriteCopy);
 
 		// Set up the "ping" feedback input (read from previous pass)
 		FString PingInputKey = NodeId + TEXT("._ping_feedback");
@@ -1309,10 +1317,10 @@ void FAqueductGraphExecutor::DispatchMultiPassNode(
 		// DispatchDynamicNode handles all transitions (UAVCompute→SRVCompute).
 		DispatchDynamicNode(RHICmdList, NodeId, ShaderData, Resolution);
 
-		// Restore original output texture
-		if (bHadOriginal)
+		// Restore every destination texture before the next pass or finalization.
+		for (const TPair<FString, FAqueductTexture>& Saved : SavedOutputs)
 		{
-			NodeTextures.Add(PrimaryOutputKey, SavedOutput);
+			NodeTextures.Add(Saved.Key, Saved.Value);
 		}
 
 		NodeTextures.Remove(PingInputKey);
@@ -1325,12 +1333,20 @@ void FAqueductGraphExecutor::DispatchMultiPassNode(
 	// declared output format. RHICmdList.CopyTexture is a hardware copy that requires
 	// matching formats — using FAqueductBlitCS makes the hardware do the float conversion
 	// on write.
-	FString LastWrittenKey = (TotalPasses % 2 == 0) ? PongKey : PingKey;
-	FAqueductTexture* SrcEntry = NodeTextures.Find(LastWrittenKey);
-	FAqueductTexture* DstEntry = NodeTextures.Find(PrimaryOutputKey);
-	if (SrcEntry && DstEntry && SrcEntry->Texture.IsValid() && DstEntry->Texture.IsValid())
+	const FString PrimaryStageKey = (TotalPasses % 2 == 0) ? PongKey : PingKey;
+	for (int32 OutputIndex = 0; OutputIndex < ShaderData.OutputSemantics.Num(); ++OutputIndex)
 	{
-		DispatchFormatConvert(RHICmdList, SrcEntry->Texture, DstEntry->Texture, Resolution);
+		const FString& Semantic = ShaderData.OutputSemantics[OutputIndex];
+		const FString SourceKey = OutputIndex == 0
+			? PrimaryStageKey
+			: NodeId + TEXT(".__stage_") + Semantic;
+		const FString DestinationKey = bMultiOutput ? NodeId + TEXT(".") + Semantic : NodeId;
+		FAqueductTexture* SrcEntry = NodeTextures.Find(ResolvePoolKey(SourceKey));
+		FAqueductTexture* DstEntry = NodeTextures.Find(ResolvePoolKey(DestinationKey));
+		if (SrcEntry && DstEntry && SrcEntry->Texture.IsValid() && DstEntry->Texture.IsValid())
+		{
+			DispatchFormatConvert(RHICmdList, SrcEntry->Texture, DstEntry->Texture, Resolution);
+		}
 	}
 
 	UE_LOG(LogAqueduct, Log, TEXT("  [%s] Multi-pass complete (%d passes + format convert)"), *NodeId, TotalPasses);
