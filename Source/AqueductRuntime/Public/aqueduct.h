@@ -259,10 +259,10 @@ struct AqueductBitmapData *aqueduct_bitmap_decode(const uint8_t *bytes, uint32_t
 int32_t aqueduct_asset_verify(const uint8_t *bytes, uint32_t bytes_len, const char *expected_hash);
 
 /**
- * Warm the embedded Slang compiler (decompress, audit, Wasmtime load) off
- * the first compilation's critical path. Call from a background thread at
- * host startup; concurrent compilations safely wait on the same one-time
- * init. Returns false on failure (see `aqueduct_last_error`).
+ * Warm embedded node assets and the Slang compiler off the first graph's
+ * critical path. Call from a background thread at host startup; concurrent
+ * lookups and compilations safely wait on the same one-time initialization.
+ * Returns false on failure (see `aqueduct_last_error`).
  */
 bool aqueduct_compiler_warm(void);
 

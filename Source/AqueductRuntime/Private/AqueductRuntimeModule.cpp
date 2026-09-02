@@ -117,13 +117,13 @@ void FAqueductRuntimeModule::StartupModule()
 		UE_LOG(LogTemp, Log, TEXT("AqueductRuntime loaded — FFI version %s, shaders: %s"), *Version, *PluginShaderDir);
 	}
 
-	// Warm the embedded Slang compiler during startup dead time so the first
-	// custom-node compile never pays its one-time setup.
+	// Warm compressed node assets and the embedded Slang compiler during
+	// startup dead time so the first graph never pays either one-time setup.
 	Async(EAsyncExecution::Thread, []()
 	{
 		if (!aqueduct_compiler_warm())
 		{
-			UE_LOG(LogTemp, Warning, TEXT("Aqueduct Slang compiler warm-up failed: %s"),
+			UE_LOG(LogTemp, Warning, TEXT("Aqueduct runtime warm-up failed: %s"),
 				*UE::Aqueduct::FfiToString(aqueduct_last_error()));
 		}
 	});
