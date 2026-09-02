@@ -11,6 +11,8 @@ namespace
 	// environment's PUBLIC_STORAGE_URL config; the whitelist accepts all of
 	// ours so graphs resolve wherever the content-addressed object exists.
 	constexpr const TCHAR* AssetUrlPrefixes[] = {
+		TEXT("https://storage.aqueduct.sh/assets/"),
+		TEXT("https://storage-dev.aqueduct.sh/assets/"),
 		TEXT("https://storage.iliad.ai/assets/"),
 		TEXT("https://storage-dev.iliad.ai/assets/"),
 	};
