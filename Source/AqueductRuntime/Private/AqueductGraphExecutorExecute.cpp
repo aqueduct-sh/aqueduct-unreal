@@ -920,11 +920,27 @@ void FAqueductGraphExecutor::GenerateRequiredMipmapsForNode(
 // Dynamic node dispatch
 // ---------------------------------------------------------------------------
 
+FAqueductGraphExecutor::FNodeDispatchSize FAqueductGraphExecutor::ResolveNodeDispatchSize(
+	const FString& NodeId,
+	uint32 PassIndex,
+	uint32 Resolution) const
+{
+	const FExecutionPlanNode* Plan = PlanNodes.Find(NodeId);
+	if (!Plan || Plan->Dispatch.IsEmpty())
+	{
+		return { Resolution, Resolution };
+	}
+
+	const int32 Index = FMath::Min((int32)PassIndex, Plan->Dispatch.Num() - 1);
+	return Plan->Dispatch[Index];
+}
+
 void FAqueductGraphExecutor::DispatchDynamicNode(
 	FRHICommandListImmediate& RHICmdList,
 	const FString& NodeId,
 	const FNodeShaderData& ShaderData,
-	uint32 Resolution)
+	uint32 Resolution,
+	uint32 PassIndex)
 {
 	FAqueductDynamicCS::FPermutationDomain PermDomain;
 	PermDomain.Set<FAqueductDynamicCS::FNodeIndex>(ShaderData.PermutationIndex);
@@ -1164,10 +1180,12 @@ void FAqueductGraphExecutor::DispatchDynamicNode(
 	// format-convert site for why the raw batched path is forbidden).
 	UE_LOG(LogAqueduct, Log, TEXT("  [%s] Binding parameters..."), *NodeId);
 
-	uint32 GroupCount = FMath::DivideAndRoundUp(Resolution, (uint32)WORKGROUP_SIZE);
-	UE_LOG(LogAqueduct, Log, TEXT("  [%s] Dispatching %dx%d groups..."), *NodeId, GroupCount, GroupCount);
+	const FNodeDispatchSize DispatchSize = ResolveNodeDispatchSize(NodeId, PassIndex, Resolution);
+	const uint32 GroupCountX = FMath::DivideAndRoundUp(DispatchSize.Width, (uint32)WORKGROUP_SIZE);
+	const uint32 GroupCountY = FMath::DivideAndRoundUp(DispatchSize.Height, (uint32)WORKGROUP_SIZE);
+	UE_LOG(LogAqueduct, Log, TEXT("  [%s] Dispatching %dx%d groups..."), *NodeId, GroupCountX, GroupCountY);
 	FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, PassParameters,
-		FIntVector(GroupCount, GroupCount, 1));
+		FIntVector(GroupCountX, GroupCountY, 1));
 
 	// No GPU flush here: the UAV→SRV transition below is the hazard barrier that
 	// orders this node's writes before any downstream node samples it (UE's
@@ -1315,7 +1333,7 @@ void FAqueductGraphExecutor::DispatchMultiPassNode(
 
 		// Dispatch the shader for this pass.
 		// DispatchDynamicNode handles all transitions (UAVCompute→SRVCompute).
-		DispatchDynamicNode(RHICmdList, NodeId, ShaderData, Resolution);
+		DispatchDynamicNode(RHICmdList, NodeId, ShaderData, Resolution, Pass);
 
 		// Restore every destination texture before the next pass or finalization.
 		for (const TPair<FString, FAqueductTexture>& Saved : SavedOutputs)

@@ -318,6 +318,25 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			double Passes = 1.0;
 			Node->TryGetNumberField(TEXT("passes"), Passes);
 			Entry.Passes = FMath::Max(1u, (uint32)Passes);
+			const TArray<TSharedPtr<FJsonValue>>* Dispatch = nullptr;
+			if (Node->TryGetArrayField(TEXT("dispatch"), Dispatch))
+			{
+				for (const TSharedPtr<FJsonValue>& DispatchValue : *Dispatch)
+				{
+					const TSharedPtr<FJsonObject>* Size = nullptr;
+					if (!DispatchValue.IsValid() || !DispatchValue->TryGetObject(Size) || !Size || !Size->IsValid())
+					{
+						continue;
+					}
+					double Width = 1.0;
+					double Height = 1.0;
+					(*Size)->TryGetNumberField(TEXT("width"), Width);
+					(*Size)->TryGetNumberField(TEXT("height"), Height);
+					FNodeDispatchSize& DispatchSize = Entry.Dispatch.AddDefaulted_GetRef();
+					DispatchSize.Width = FMath::Max(1u, (uint32)Width);
+					DispatchSize.Height = FMath::Max(1u, (uint32)Height);
+				}
+			}
 			Node->TryGetBoolField(TEXT("dither_8bit"), Entry.bDither8Bit);
 			const TSharedPtr<FJsonObject>* DitherOutputs = nullptr;
 			if (Node->TryGetObjectField(TEXT("dither_8bit_outputs"), DitherOutputs))

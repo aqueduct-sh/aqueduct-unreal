@@ -98,7 +98,6 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 	if (!Graph || !bShadersCompiled) return;
 
 	uint32 Resolution = aqueduct_graph_resolution(Graph);
-	uint32 GroupCount = FMath::DivideAndRoundUp(Resolution, (uint32)WORKGROUP_SIZE);
 
 	const TArray<FString>& ExecutionOrder = PlanOrder;
 
@@ -218,8 +217,9 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 			FCompiledDispatch& D = CG->Dispatches.AddDefaulted_GetRef();
 			D.PermutationIndex = SD->PermutationIndex;
 			D.PipelineId = PipelineId;
-			D.WorkgroupsX = GroupCount;
-			D.WorkgroupsY = GroupCount;
+			const FNodeDispatchSize DispatchSize = ResolveNodeDispatchSize(NodeId, PassIdx, Resolution);
+			D.WorkgroupsX = FMath::DivideAndRoundUp(DispatchSize.Width, (uint32)WORKGROUP_SIZE);
+			D.WorkgroupsY = FMath::DivideAndRoundUp(DispatchSize.Height, (uint32)WORKGROUP_SIZE);
 			D.NodeIndex = NodeIdx;
 			D.PassIndex = PassIdx;
 			D.TotalPasses = TotalPasses;

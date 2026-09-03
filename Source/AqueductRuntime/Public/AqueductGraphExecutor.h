@@ -399,6 +399,11 @@ private:
 		uint32 Stride = 4;
 		uint32 Count = 1;
 	};
+	struct FNodeDispatchSize
+	{
+		uint32 Width = 1;
+		uint32 Height = 1;
+	};
 
 	/** One node of the Rust-computed execution plan: every semantic fact the
 	 *  dispatch paths need (formats, passes, wiring, defaults, scratch
@@ -411,6 +416,7 @@ private:
 		TMap<FString, FString> Formats;        // semantic -> destination format
 		TMap<FString, FString> ComputeFormats; // semantic -> dispatch format
 		uint32 Passes = 1;
+		TArray<FNodeDispatchSize> Dispatch;
 		TArray<FString> Outputs;
 		TMap<FString, FString> Inputs; // semantic -> resolved source texture key
 		TMap<FString, FLinearColor> InputDefaults;
@@ -570,8 +576,14 @@ private:
 		FRHICommandListImmediate& RHICmdList,
 		const FString& NodeId,
 		const FNodeShaderData& ShaderData,
-		uint32 Resolution
+		uint32 Resolution,
+		uint32 PassIndex = 0
 	);
+	FNodeDispatchSize ResolveNodeDispatchSize(
+		const FString& NodeId,
+		uint32 PassIndex,
+		uint32 Resolution
+	) const;
 
 	/** Dispatch a multi-pass node with ping-pong buffers. */
 	void DispatchMultiPassNode(
