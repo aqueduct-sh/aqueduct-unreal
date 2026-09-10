@@ -404,6 +404,11 @@ private:
 		uint32 Width = 1;
 		uint32 Height = 1;
 	};
+	struct FResolvedPass
+	{
+		FString Ping;
+		TMap<FString, FString> Outputs;
+	};
 
 	/** One node of the Rust-computed execution plan: every semantic fact the
 	 *  dispatch paths need (formats, passes, wiring, defaults, scratch
@@ -417,6 +422,9 @@ private:
 		TMap<FString, FString> ComputeFormats; // semantic -> dispatch format
 		uint32 Passes = 1;
 		TArray<FNodeDispatchSize> Dispatch;
+		TMap<FString, FNodeDispatchSize> PassResources;
+		TArray<FResolvedPass> SizedPasses;
+		bool bClearPassOutputs = false;
 		TArray<FString> Outputs;
 		TMap<FString, FString> Inputs; // semantic -> resolved source texture key
 		TMap<FString, FLinearColor> InputDefaults;
@@ -568,8 +576,12 @@ private:
 	FTextureRHIRef GetOrCreateNodeTexture(
 		const FString& TextureKey,
 		const FString& Format,
-		uint32 Resolution,
+		uint32 Width,
+		uint32 Height,
 		bool bMipmapped = false);
+
+	FString ResolvePassOutputKey(const FString& NodeId, const FString& Semantic,
+		int32 OutputIndex, uint32 PassIndex) const;
 
 	/** Dispatch a dynamically compiled node shader. */
 	void DispatchDynamicNode(

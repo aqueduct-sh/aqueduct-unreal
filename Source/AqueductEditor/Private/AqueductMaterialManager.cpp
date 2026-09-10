@@ -796,7 +796,7 @@ bool FAqueductMaterialManager::ReloadGraphFromFile(const FString& GraphFilePath)
 			if (Binding.Value && Binding.Value->Type == EJson::String
 				&& !Binding.Value->AsString().IsEmpty())
 			{
-				TextureOutputNames.Add(Binding.Key);
+				TextureOutputNames.Add(FString(*Binding.Key));
 			}
 		}
 		if (GpuOutputs.Num() != TextureOutputNames.Num())

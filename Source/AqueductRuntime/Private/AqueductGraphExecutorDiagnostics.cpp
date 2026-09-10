@@ -234,7 +234,7 @@ const TCHAR* ClassifyVramTextureKey(const FString& Key, FString& OutNodeId)
 		OutNodeId = AqueductVramNodeOf(Key);
 		return TEXT("proxy");
 	}
-	if (Key.EndsWith(TEXT(".ping")) || Key.EndsWith(TEXT(".pong")))
+	if (Key.StartsWith(TEXT("_multipass.")) || Key.Contains(TEXT(".__stage_")))
 	{
 		OutNodeId = AqueductVramNodeOf(Key);
 		return TEXT("multipass-scratch");

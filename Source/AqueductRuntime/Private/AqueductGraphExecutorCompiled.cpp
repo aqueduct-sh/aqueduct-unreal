@@ -85,7 +85,7 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 				? A.Key.Left(A.Key.Find(TEXT(".")))
 				: A.Key;
 			const FExecutionPlanNode* Producer = PlanNodes.Find(ProducerId);
-			const bool bIdentityStable = Producer && Producer->Passes <= 1;
+			const bool bIdentityStable = Producer && Producer->Passes <= 1 && !Producer->bClearPassOutputs;
 			if (bIdentityStable)
 			{
 				const FString PoolKey = FString::Printf(TEXT("_pool_%d"), A.Value);
@@ -139,6 +139,12 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 			if (ParamPair.Key == TEXT("pass_index"))
 			{
 				CP.Source = EParamSource::PassIndex;
+			}
+			else if (PlanNodes[NodeId].bClearPassOutputs &&
+				(ParamPair.Key == TEXT("node_output_width") || ParamPair.Key == TEXT("node_output_height")))
+			{
+				CP.Source = EParamSource::Static;
+				CP.Value = (float)Resolution;
 			}
 			else if (ParamPair.Key == TEXT("total_passes"))
 			{
@@ -212,6 +218,8 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 			PipelineIdMap.Add(SD->PermutationIndex, PipelineId);
 		}
 
+		const FExecutionPlanNode& NodePlan = PlanNodes[NodeId];
+
 		auto BuildDispatch = [&](uint32 PassIdx, uint32 TotalPasses) -> FCompiledDispatch&
 		{
 			FCompiledDispatch& D = CG->Dispatches.AddDefaulted_GetRef();
@@ -223,6 +231,7 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 			D.NodeIndex = NodeIdx;
 			D.PassIndex = PassIdx;
 			D.TotalPasses = TotalPasses;
+			D.bClearOutputs = NodePlan.bClearPassOutputs;
 			D.Sampler = TStaticSamplerState<SF_Bilinear>::GetRHI();
 
 			// Resolve scratch decls from the effective NodeDef (registry for
@@ -261,26 +270,14 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 				}
 			}
 
-			// Multi-pass outputs write to rgba32 staging: shared ping/pong for the
-			// primary semantic and one stable staging texture per secondary.
+			// Cache each pass's resolved output views once for allocation-free replay.
 			bool bMultiOutput = SD->OutputSemantics.Num() > 1;
 			for (int32 i = 0; i < SD->OutputSemantics.Num() && i < MAX_NODE_OUTPUTS; i++)
 			{
 				FString TexKey;
-				if (TotalPasses > 1)
+				if (TotalPasses > 1 || NodePlan.bClearPassOutputs)
 				{
-					if (i == 0)
-					{
-						// The primary output rotates through shared ping/pong.
-						if (PassIdx == 0)
-							TexKey = GSharedPingKey;
-						else
-							TexKey = (PassIdx % 2 == 1) ? GSharedPongKey : GSharedPingKey;
-					}
-					else
-					{
-						TexKey = NodeId + TEXT(".__stage_") + SD->OutputSemantics[i];
-					}
+					TexKey = ResolvePassOutputKey(NodeId, SD->OutputSemantics[i], i, PassIdx);
 				}
 				else
 				{
@@ -301,7 +298,6 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 			}
 
 			// Build input SRVs from the plan's resolved wiring.
-			const FExecutionPlanNode& NodePlan = PlanNodes[NodeId];
 			for (int32 i = 0; i < SD->InputSemantics.Num() && i < MAX_NODE_INPUTS; i++)
 			{
 				const FString& Semantic = SD->InputSemantics[i];
@@ -319,7 +315,9 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 					{
 						FString PingKey = GSharedPingKey;
 						FString PongKey = GSharedPongKey;
-						FString ReadKey = (PassIdx % 2 == 1) ? PingKey : PongKey;
+						const FString ReadKey = NodePlan.bClearPassOutputs
+							? NodePlan.SizedPasses[PassIdx].Ping
+							: ((PassIdx % 2 == 1) ? PingKey : PongKey);
 						FAqueductTexture* ReadEntry = NodeTextures.Find(ResolvePoolKey(ReadKey));
 						if (ReadEntry && ReadEntry->Texture.IsValid())
 						{
@@ -368,7 +366,7 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 			return D;
 		};
 
-		if (SD->Passes > 1)
+		if (SD->Passes > 1 || NodePlan.bClearPassOutputs)
 		{
 			for (uint32 Pass = 0; Pass < SD->Passes; Pass++)
 			{
@@ -383,18 +381,13 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 		CG->NodeDispatchRanges.Add(TPair<uint32, uint32>(DispatchStart, CG->Dispatches.Num()));
 
 		// Build one format conversion entry per multi-pass semantic.
-		if (SD->Passes > 1)
+		if (SD->Passes > 1 || NodePlan.bClearPassOutputs)
 		{
-			FString PingKey = GSharedPingKey;
-			FString PongKey = GSharedPongKey;
-			const FString PrimaryStageKey = (SD->Passes % 2 == 0) ? PongKey : PingKey;
 			const bool bMultiOutput = SD->OutputSemantics.Num() > 1;
 			for (int32 OutputIndex = 0; OutputIndex < SD->OutputSemantics.Num(); ++OutputIndex)
 			{
 				const FString& Semantic = SD->OutputSemantics[OutputIndex];
-				const FString SourceKey = OutputIndex == 0
-					? PrimaryStageKey
-					: NodeId + TEXT(".__stage_") + Semantic;
+				const FString SourceKey = ResolvePassOutputKey(NodeId, Semantic, OutputIndex, SD->Passes - 1);
 				const FString DestinationKey = bMultiOutput ? NodeId + TEXT(".") + Semantic : NodeId;
 				FAqueductTexture* SrcEntry = NodeTextures.Find(ResolvePoolKey(SourceKey));
 				FAqueductTexture* DstEntry = NodeTextures.Find(ResolvePoolKey(DestinationKey));
@@ -680,6 +673,20 @@ void FAqueductGraphExecutor::ReplayCompiledGraph(FRHICommandListImmediate& RHICm
 		for (FTextureRHIRef& Tex : D.OutputTextures)
 		{
 			RHICmdList.Transition(FRHITransitionInfo(Tex, ERHIAccess::Unknown, ERHIAccess::UAVCompute));
+		}
+
+		if (D.bClearOutputs)
+		{
+			for (const FUnorderedAccessViewRHIRef& OutputUAV : D.OutputUAVs)
+			{
+				if (OutputUAV.IsValid()) RHICmdList.ClearUAVFloat(OutputUAV, FVector4f(0, 0, 0, 0));
+			}
+			for (const FTextureRHIRef& Texture : D.OutputTextures)
+			{
+				RHICmdList.Transition(FRHITransitionInfo(Texture, ERHIAccess::UAVCompute, ERHIAccess::UAVCompute));
+			}
+			// A clear can bind its own compute pipeline.
+			LastPipelineId = UINT32_MAX;
 		}
 
 		if (D.PipelineId != LastPipelineId)

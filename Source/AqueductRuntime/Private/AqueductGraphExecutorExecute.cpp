@@ -276,7 +276,7 @@ void FAqueductGraphExecutor::ExecuteFull(FRHICommandListImmediate& RHICmdList)
 				? A.Key.Left(A.Key.Find(TEXT(".")))
 				: A.Key;
 			const FExecutionPlanNode* Producer = PlanNodes.Find(ProducerId);
-			const bool bIdentityStable = Producer && Producer->Passes <= 1;
+			const bool bIdentityStable = Producer && Producer->Passes <= 1 && !Producer->bClearPassOutputs;
 			if (bIdentityStable)
 			{
 				const FString PoolKey = FString::Printf(TEXT("_pool_%d"), A.Value);
@@ -299,23 +299,31 @@ void FAqueductGraphExecutor::ExecuteFull(FRHICommandListImmediate& RHICmdList)
 			const FString* DestinationFormat = Plan.Formats.Find(OutSem);
 			const FString* ComputeFormat = Plan.ComputeFormats.Find(OutSem);
 			ResolvedFormats.Add(TextureKey, DestinationFormat ? *DestinationFormat : Plan.Format);
-			const FString& AllocationFormat = Plan.Passes > 1
+			const FString& AllocationFormat = (Plan.Passes > 1 || Plan.bClearPassOutputs)
 				? (DestinationFormat ? *DestinationFormat : Plan.Format)
 				: (ComputeFormat ? *ComputeFormat : Plan.ComputeFormat);
 			GetOrCreateNodeTexture(TextureKey, AllocationFormat,
-				Resolution, MipRequiredTextureKeys.Contains(TextureKey));
+				Resolution, Resolution, MipRequiredTextureKeys.Contains(TextureKey));
 		}
 
 		// The shared multi-pass ping/pong pair holds rgba32float intermediates;
 		// a format-convert blit lands each node's final format afterwards.
-		if (Plan.Passes > 1)
+		if (Plan.bClearPassOutputs)
 		{
-			GetOrCreateNodeTexture(GSharedPingKey, TEXT("rgba32float"), Resolution);
-			GetOrCreateNodeTexture(GSharedPongKey, TEXT("rgba32float"), Resolution);
+			for (const auto& Resource : Plan.PassResources)
+			{
+				GetOrCreateNodeTexture(Resource.Key, TEXT("rgba32float"),
+					Resource.Value.Width, Resource.Value.Height);
+			}
+		}
+		else if (Plan.Passes > 1)
+		{
+			GetOrCreateNodeTexture(GSharedPingKey, TEXT("rgba32float"), Resolution, Resolution);
+			GetOrCreateNodeTexture(GSharedPongKey, TEXT("rgba32float"), Resolution, Resolution);
 			for (int32 OutputIndex = 1; OutputIndex < Plan.Outputs.Num(); ++OutputIndex)
 			{
 				GetOrCreateNodeTexture(NodeId + TEXT(".__stage_") + Plan.Outputs[OutputIndex],
-					TEXT("rgba32float"), Resolution);
+					TEXT("rgba32float"), Resolution, Resolution);
 			}
 		}
 	}
@@ -474,7 +482,7 @@ void FAqueductGraphExecutor::ExecuteFull(FRHICommandListImmediate& RHICmdList)
 		UE_LOG(LogAqueduct, Log, TEXT("Dispatching node %d/%d: %s"), Idx + 1, ExecutionOrder.Num(), *NodeId);
 		if (ShaderData)
 		{
-			if (ShaderData->Passes > 1)
+			if (ShaderData->Passes > 1 || PlanNodes[NodeId].bClearPassOutputs)
 			{
 				DispatchMultiPassNode(RHICmdList, NodeId, *ShaderData, Resolution);
 			}
@@ -535,7 +543,7 @@ void FAqueductGraphExecutor::ExecuteFull(FRHICommandListImmediate& RHICmdList)
 		if (ResolvedFormat && *ResolvedFormat == TEXT("rgba8unorm"))
 		{
 			const FString ConvKey = TEXT("_dither_") + TextureKey;
-			GetOrCreateNodeTexture(ConvKey, TEXT("rgba8unorm"), Resolution);
+			GetOrCreateNodeTexture(ConvKey, TEXT("rgba8unorm"), Resolution, Resolution);
 			DispatchDitherConversion(RHICmdList, TextureKey, ConvKey, Resolution);
 			OutputTextures.Add(Output.Key, GetNodeTexture(ConvKey));
 			// Bounded: the wide compute texture is dead once the dithered
@@ -959,14 +967,18 @@ void FAqueductGraphExecutor::DispatchDynamicNode(
 
 	FRHIComputeShader* ShaderRHI = ComputeShader.GetComputeShader();
 
-	bool bMultiOutput = ShaderData.OutputSemantics.Num() > 1;
+	const FExecutionPlanNode* Plan = PlanNodes.Find(NodeId);
+	if (!ensure(Plan)) return;
+	const bool bStaged = ShaderData.Passes > 1 || Plan->bClearPassOutputs;
+	const bool bMultiOutput = ShaderData.OutputSemantics.Num() > 1;
 	FUnorderedAccessViewRHIRef OutputUAVs[MAX_NODE_OUTPUTS];
+	FTextureRHIRef BoundOutputs[MAX_NODE_OUTPUTS];
 
 	for (int32 i = 0; i < ShaderData.OutputSemantics.Num() && i < MAX_NODE_OUTPUTS; i++)
 	{
-		FString TexKey = bMultiOutput
-			? (NodeId + TEXT(".") + ShaderData.OutputSemantics[i])
-			: NodeId;
+		const FString TexKey = bStaged
+			? ResolvePassOutputKey(NodeId, ShaderData.OutputSemantics[i], i, PassIndex)
+			: (bMultiOutput ? NodeId + TEXT(".") + ShaderData.OutputSemantics[i] : NodeId);
 
 		FAqueductTexture* Entry = NodeTextures.Find(ResolvePoolKey(TexKey));
 		if (!Entry || !Entry->Texture.IsValid())
@@ -975,29 +987,38 @@ void FAqueductGraphExecutor::DispatchDynamicNode(
 			return;
 		}
 
+		BoundOutputs[i] = Entry->Texture;
 		OutputUAVs[i] = RHICmdList.CreateUnorderedAccessView(
 			Entry->Texture, FRHIViewDesc::CreateTextureUAV()
 				.SetDimension(ETextureDimension::Texture2D)
 				.SetMipLevel(0));
 		RHICmdList.Transition(FRHITransitionInfo(Entry->Texture, ERHIAccess::Unknown, ERHIAccess::UAVCompute));
+		if (Plan->bClearPassOutputs)
+		{
+			RHICmdList.ClearUAVFloat(OutputUAVs[i], FVector4f(0, 0, 0, 0));
+			RHICmdList.Transition(FRHITransitionInfo(Entry->Texture, ERHIAccess::UAVCompute, ERHIAccess::UAVCompute));
+		}
 	}
 
 	// Resolve input connections and create SRVs BEFORE setting the main
 	// pipeline, because R32Float expansion dispatches its own compute shader.
 	FTCHARToUTF8 NodeIdUtf8(*NodeId);
-	const FExecutionPlanNode* Plan = PlanNodes.Find(NodeId);
 
 	FShaderResourceViewRHIRef InputSRVs[MAX_NODE_INPUTS];
 	for (int32 i = 0; i < ShaderData.InputSemantics.Num() && i < MAX_NODE_INPUTS; i++)
 	{
 		const FString& Semantic = ShaderData.InputSemantics[i];
 
-		// Multi-pass feedback: "ping" input reads from the ping-pong buffer
+		// Feedback reads the resolved preceding resource without changing public outputs.
 		if (Semantic == TEXT("ping"))
 		{
-			FTextureRHIRef FeedbackTex = GetNodeTexture(NodeId + TEXT("._ping_feedback"));
-			if (FeedbackTex.IsValid())
+			if (bStaged && PassIndex > 0)
 			{
+				const FString ReadKey = Plan->bClearPassOutputs
+					? Plan->SizedPasses[PassIndex].Ping
+					: FString(PassIndex % 2 == 1 ? GSharedPingKey : GSharedPongKey);
+				const FTextureRHIRef FeedbackTex = GetNodeTexture(ReadKey);
+				if (!ensure(FeedbackTex.IsValid())) return;
 				InputSRVs[i] = RHICmdList.CreateShaderResourceView(
 					FeedbackTex, FRHIViewDesc::CreateTextureSRV()
 						.SetDimension(ETextureDimension::Texture2D));
@@ -1017,7 +1038,7 @@ void FAqueductGraphExecutor::DispatchDynamicNode(
 			continue;
 		}
 
-		const FString* SourceKey = Plan ? Plan->Inputs.Find(Semantic) : nullptr;
+		const FString* SourceKey = Plan->Inputs.Find(Semantic);
 		if (!SourceKey)
 		{
 			continue;
@@ -1172,6 +1193,20 @@ void FAqueductGraphExecutor::DispatchDynamicNode(
 				}
 			}
 
+			if (bStaged && ParamName == TEXT("pass_index"))
+			{
+				FloatVal = (float)PassIndex;
+			}
+			else if (bStaged && ParamName == TEXT("total_passes"))
+			{
+				FloatVal = (float)ShaderData.Passes;
+			}
+			else if (Plan->bClearPassOutputs &&
+				(ParamName == TEXT("node_output_width") || ParamName == TEXT("node_output_height")))
+			{
+				FloatVal = (float)Resolution;
+			}
+
 			reinterpret_cast<float*>(&PassParameters.AQ_Params[ArrayIdx])[CompIdx] = FloatVal;
 		}
 	}
@@ -1195,15 +1230,11 @@ void FAqueductGraphExecutor::DispatchDynamicNode(
 	// alone, and CPU readback paths issue their own flush where they need one.
 
 	UE_LOG(LogAqueduct, Log, TEXT("  [%s] Transitioning to SRV..."), *NodeId);
-	for (int32 i = 0; i < ShaderData.OutputSemantics.Num() && i < MAX_NODE_OUTPUTS; i++)
+	for (const FTextureRHIRef& Texture : BoundOutputs)
 	{
-		FString TexKey = bMultiOutput
-			? (NodeId + TEXT(".") + ShaderData.OutputSemantics[i])
-			: NodeId;
-		FAqueductTexture* OutEntry = NodeTextures.Find(ResolvePoolKey(TexKey));
-		if (OutEntry && OutEntry->Texture.IsValid())
+		if (Texture.IsValid())
 		{
-			RHICmdList.Transition(FRHITransitionInfo(OutEntry->Texture, ERHIAccess::UAVCompute, ERHIAccess::SRVCompute));
+			RHICmdList.Transition(FRHITransitionInfo(Texture, ERHIAccess::UAVCompute, ERHIAccess::SRVCompute));
 		}
 	}
 
@@ -1213,8 +1244,21 @@ void FAqueductGraphExecutor::DispatchDynamicNode(
 }
 
 // ---------------------------------------------------------------------------
-// Multi-pass node dispatch with ping-pong buffers
+// Staged node dispatch with resolved resources or legacy ping-pong buffers
 // ---------------------------------------------------------------------------
+
+FString FAqueductGraphExecutor::ResolvePassOutputKey(
+	const FString& NodeId, const FString& Semantic, int32 OutputIndex, uint32 PassIndex) const
+{
+	const FExecutionPlanNode& Plan = PlanNodes[NodeId];
+	if (Plan.bClearPassOutputs)
+	{
+		return Plan.SizedPasses[PassIndex].Outputs[Semantic];
+	}
+	return OutputIndex == 0
+		? FString(PassIndex % 2 == 0 ? GSharedPingKey : GSharedPongKey)
+		: NodeId + TEXT(".__stage_") + Semantic;
+}
 
 void FAqueductGraphExecutor::DispatchMultiPassNode(
 	FRHICommandListImmediate& RHICmdList,
@@ -1222,11 +1266,9 @@ void FAqueductGraphExecutor::DispatchMultiPassNode(
 	const FNodeShaderData& ShaderData,
 	uint32 Resolution)
 {
-	uint32 TotalPasses = ShaderData.Passes;
+	const uint32 TotalPasses = ShaderData.Passes;
 	UE_LOG(LogAqueduct, Log, TEXT("  [%s] Multi-pass: %d passes"), *NodeId, TotalPasses);
 
-	FString PingKey = GSharedPingKey;
-	FString PongKey = GSharedPongKey;
 	const bool bMultiOutput = ShaderData.OutputSemantics.Num() > 1;
 
 	// Zero-fill all shared scratch slots this node declares before the first
@@ -1242,122 +1284,19 @@ void FAqueductGraphExecutor::DispatchMultiPassNode(
 		}
 	}
 
-	// Set pass_index and total_passes as param overrides (read by shader via AQ_Params)
-	FString PassIndexOverride = NodeId + TEXT(".pass_index");
-	FString TotalPassesOverride = NodeId + TEXT(".total_passes");
-	ParamValuesInt.Add(TotalPassesOverride, (int32)TotalPasses);
-
-	// All passes run in rgba32float ping-pong buffers. Multi-pass algorithms (JFA,
-	// separable blur, etc.) need 4 channels and full precision for intermediate data.
-	// Node implementers don't need to know about this — the engine appends a transparent
-	// format conversion copy after all passes complete.
-	for (uint32 Pass = 0; Pass < TotalPasses; Pass++)
+	for (uint32 Pass = 0; Pass < TotalPasses; ++Pass)
 	{
-		// All passes write to ping/pong — NOT to the output texture.
-		FString ReadKey;   // "ping" input reads from this
-		FString WriteKey;  // "output" writes to this
-
-		if (Pass == 0)
-		{
-				ReadKey = FString();  // empty = use placeholder
-			WriteKey = PingKey;
-		}
-		else if (Pass % 2 == 1)
-		{
-			ReadKey = PingKey;
-			WriteKey = PongKey;
-		}
-		else
-		{
-			ReadKey = PongKey;
-			WriteKey = PingKey;
-		}
-
-		ParamValuesInt.Add(PassIndexOverride, (int32)Pass);
-
-		// Temporarily swap the node's output texture to the write target
-		// and set up the ping input to read from the correct buffer.
-		// VALUE COPIES before every Add: inserting `*PointerIntoThisMap`
-		// into the same map is a use-after-free — the insert can rehash and
-		// move the pointee before the value is copied.
-		FAqueductTexture WriteCopy;
-		if (const FAqueductTexture* WriteEntry = NodeTextures.Find(ResolvePoolKey(WriteKey)))
-		{
-			WriteCopy = *WriteEntry;
-		}
-		else
-		{
-			UE_LOG(LogAqueduct, Error, TEXT("  [%s] Missing write texture %s for pass %d"), *NodeId, *WriteKey, Pass);
-			break;
-		}
-
-		// Redirect every output to rgba32float staging for the duration of this
-		// pass. The primary rotates through shared ping/pong; secondary outputs
-		// retain one stable stage texture across the sequence.
-		TArray<TPair<FString, FAqueductTexture>> SavedOutputs;
-		for (int32 OutputIndex = 0; OutputIndex < ShaderData.OutputSemantics.Num(); ++OutputIndex)
-		{
-			const FString& Semantic = ShaderData.OutputSemantics[OutputIndex];
-			const FString OutputKey = bMultiOutput ? NodeId + TEXT(".") + Semantic : NodeId;
-			const FString StageKey = OutputIndex == 0
-				? WriteKey
-				: NodeId + TEXT(".__stage_") + Semantic;
-			const FAqueductTexture* Original = NodeTextures.Find(ResolvePoolKey(OutputKey));
-			const FAqueductTexture* Stage = NodeTextures.Find(ResolvePoolKey(StageKey));
-			if (!Original || !Stage)
-			{
-				UE_LOG(LogAqueduct, Error, TEXT("  [%s] Missing output stage %s for pass %d"), *NodeId, *StageKey, Pass);
-				ensure(false);
-				return;
-			}
-			SavedOutputs.Emplace(ResolvePoolKey(OutputKey), *Original);
-			NodeTextures.Add(ResolvePoolKey(OutputKey), *Stage);
-		}
-
-		// Set up the "ping" feedback input (read from previous pass)
-		FString PingInputKey = NodeId + TEXT("._ping_feedback");
-		if (!ReadKey.IsEmpty())
-		{
-			FAqueductTexture ReadCopy;
-			bool bHasRead = false;
-			if (const FAqueductTexture* ReadEntry = NodeTextures.Find(ReadKey))
-			{
-				ReadCopy = *ReadEntry;
-				bHasRead = true;
-			}
-			if (bHasRead)
-			{
-				NodeTextures.Add(PingInputKey, ReadCopy);
-			}
-		}
-
-		// Dispatch the shader for this pass.
-		// DispatchDynamicNode handles all transitions (UAVCompute→SRVCompute).
 		DispatchDynamicNode(RHICmdList, NodeId, ShaderData, Resolution, Pass);
-
-		// Restore every destination texture before the next pass or finalization.
-		for (const TPair<FString, FAqueductTexture>& Saved : SavedOutputs)
-		{
-			NodeTextures.Add(Saved.Key, Saved.Value);
-		}
-
-		NodeTextures.Remove(PingInputKey);
 	}
-
-	ParamValuesInt.Remove(PassIndexOverride);
-	ParamValuesInt.Remove(TotalPassesOverride);
 
 	// Format conversion: compute-shader blit from rgba32float ping/pong to the node's
 	// declared output format. RHICmdList.CopyTexture is a hardware copy that requires
 	// matching formats — using FAqueductBlitCS makes the hardware do the float conversion
 	// on write.
-	const FString PrimaryStageKey = (TotalPasses % 2 == 0) ? PongKey : PingKey;
 	for (int32 OutputIndex = 0; OutputIndex < ShaderData.OutputSemantics.Num(); ++OutputIndex)
 	{
 		const FString& Semantic = ShaderData.OutputSemantics[OutputIndex];
-		const FString SourceKey = OutputIndex == 0
-			? PrimaryStageKey
-			: NodeId + TEXT(".__stage_") + Semantic;
+		const FString SourceKey = ResolvePassOutputKey(NodeId, Semantic, OutputIndex, TotalPasses - 1);
 		const FString DestinationKey = bMultiOutput ? NodeId + TEXT(".") + Semantic : NodeId;
 		FAqueductTexture* SrcEntry = NodeTextures.Find(ResolvePoolKey(SourceKey));
 		FAqueductTexture* DstEntry = NodeTextures.Find(ResolvePoolKey(DestinationKey));

@@ -48,8 +48,21 @@ void FAqueductGraphExecutor::RemoveDeletedNodes(const TSet<FString>& ValidNodeId
 	// are never evicted. Without this, deleted nodes' textures stay
 	// resident until the next ReleaseGraphResources.
 	TArray<FString> DoomedTextures;
+	TSet<FString> LivePassResources;
+	for (const auto& Node : PlanNodes)
+	{
+		for (const auto& Resource : Node.Value.PassResources)
+		{
+			LivePassResources.Add(Resource.Key);
+		}
+	}
 	for (const auto& Pair : NodeTextures)
 	{
+		if (Pair.Key.StartsWith(TEXT("_multipass.sized_")) && !LivePassResources.Contains(Pair.Key))
+		{
+			DoomedTextures.Add(Pair.Key);
+			continue;
+		}
 		FString OwnerNode;
 		ClassifyVramTextureKey(Pair.Key, OwnerNode);
 		if (!OwnerNode.IsEmpty() && !ValidNodeIds.Contains(OwnerNode))

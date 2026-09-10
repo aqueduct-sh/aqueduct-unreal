@@ -218,6 +218,15 @@ int32_t aqueduct_graph_eval_time_params(const LoadedGraph *handle,
 char *aqueduct_graph_execution_plan_json(const LoadedGraph *handle, const LoadedRegistry *reg);
 
 /**
+ * Execution plan with explicit external-executor capability negotiation.
+ * Pass version 1 only if the executor implements independently sized passes,
+ * output clears, final-size intrinsics, and the serialized resource bindings.
+ */
+char *aqueduct_graph_execution_plan_json_versioned(const LoadedGraph *handle,
+                                                   const LoadedRegistry *reg,
+                                                   uint32_t supported_pass_plan_version);
+
+/**
  * Create a new compiler targeting HLSL output (for Unreal Engine).
  * `cache_dir` may be null for no disk caching.
  */

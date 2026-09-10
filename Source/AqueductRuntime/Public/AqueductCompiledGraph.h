@@ -69,6 +69,7 @@ struct FCompiledDispatch
 	// the clear must run immediately before this node's first pass, never
 	// batched up front.
 	TArray<FUnorderedAccessViewRHIRef> ScratchUAVsToZero;
+	bool bClearOutputs = false;
 	FSamplerStateRHIRef Sampler;
 
 	// Uniform data

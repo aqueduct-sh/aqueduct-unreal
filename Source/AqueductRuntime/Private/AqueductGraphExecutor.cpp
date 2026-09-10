@@ -203,7 +203,7 @@ void FAqueductGraphExecutor::RefreshNodeSignatures()
 			FString Sig;
 			if (Pair.Value->TryGetString(Sig))
 			{
-				NodeSigs.Add(Pair.Key, Sig);
+				NodeSigs.Add(FString(*Pair.Key), Sig);
 			}
 		}
 	}
@@ -264,7 +264,7 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 		return false;
 	}
 
-	const FString PlanJson = FfiToString(aqueduct_graph_execution_plan_json(Graph, Registry));
+	const FString PlanJson = FfiToString(aqueduct_graph_execution_plan_json_versioned(Graph, Registry, 1));
 	if (PlanJson.IsEmpty())
 	{
 		UE_LOG(LogAqueduct, Error, TEXT("Execution plan failed: %s"), *GetLastError());
@@ -303,7 +303,7 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			{
 				for (const auto& Pair : (*Formats)->Values)
 				{
-					Entry.Formats.Add(Pair.Key, Pair.Value->AsString());
+					Entry.Formats.Add(FString(*Pair.Key), Pair.Value->AsString());
 				}
 			}
 			const TSharedPtr<FJsonObject>* ComputeFormats = nullptr;
@@ -311,7 +311,7 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			{
 				for (const auto& Pair : (*ComputeFormats)->Values)
 				{
-					Entry.ComputeFormats.Add(Pair.Key, Pair.Value->AsString());
+					Entry.ComputeFormats.Add(FString(*Pair.Key), Pair.Value->AsString());
 				}
 			}
 			Node->TryGetStringField(TEXT("definition_hash"), Entry.DefinitionHash);
@@ -337,13 +337,38 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 					DispatchSize.Height = FMath::Max(1u, (uint32)Height);
 				}
 			}
+			const TSharedPtr<FJsonObject>* PassPlan = nullptr;
+			if (Node->TryGetObjectField(TEXT("pass_plan"), PassPlan))
+			{
+				if (!ensure((*PassPlan)->GetIntegerField(TEXT("version")) == 1)) return false;
+				Entry.bClearPassOutputs = (*PassPlan)->GetBoolField(TEXT("clear_outputs"));
+				for (const auto& ResourceValue : (*PassPlan)->GetArrayField(TEXT("resources")))
+				{
+					const auto Resource = ResourceValue->AsObject();
+					const auto Extent = Resource->GetObjectField(TEXT("extent"));
+					Entry.PassResources.Add(Resource->GetStringField(TEXT("key")), {
+						(uint32)Extent->GetIntegerField(TEXT("width")),
+						(uint32)Extent->GetIntegerField(TEXT("height")) });
+				}
+				for (const auto& PassValue : (*PassPlan)->GetArrayField(TEXT("passes")))
+				{
+					const auto Pass = PassValue->AsObject();
+					FResolvedPass& Stage = Entry.SizedPasses.AddDefaulted_GetRef();
+					Pass->TryGetStringField(TEXT("ping"), Stage.Ping);
+					for (const auto& Binding : Pass->GetObjectField(TEXT("outputs"))->Values)
+					{
+						Stage.Outputs.Add(FString(*Binding.Key), Binding.Value->AsString());
+					}
+				}
+				if (!ensure(Entry.SizedPasses.Num() == (int32)Entry.Passes)) return false;
+			}
 			Node->TryGetBoolField(TEXT("dither_8bit"), Entry.bDither8Bit);
 			const TSharedPtr<FJsonObject>* DitherOutputs = nullptr;
 			if (Node->TryGetObjectField(TEXT("dither_8bit_outputs"), DitherOutputs))
 			{
 				for (const auto& Pair : (*DitherOutputs)->Values)
 				{
-					Entry.Dither8BitOutputs.Add(Pair.Key, Pair.Value->AsBool());
+					Entry.Dither8BitOutputs.Add(FString(*Pair.Key), Pair.Value->AsBool());
 				}
 			}
 			const TArray<TSharedPtr<FJsonValue>>* Outputs = nullptr;
@@ -370,7 +395,7 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			{
 				for (const auto& Pair : (*Inputs)->Values)
 				{
-					Entry.Inputs.Add(Pair.Key, Pair.Value->AsString());
+					Entry.Inputs.Add(FString(*Pair.Key), Pair.Value->AsString());
 				}
 			}
 			const TSharedPtr<FJsonObject>* Defaults = nullptr;
@@ -378,7 +403,7 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			{
 				for (const auto& Pair : (*Defaults)->Values)
 				{
-					Entry.InputDefaults.Add(Pair.Key, RgbaArrayToColor(Pair.Value->AsArray()));
+					Entry.InputDefaults.Add(FString(*Pair.Key), RgbaArrayToColor(Pair.Value->AsArray()));
 				}
 			}
 			const TArray<TSharedPtr<FJsonValue>>* Mips = nullptr;
@@ -431,7 +456,7 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 	{
 		for (const auto& Pair : (*Outputs)->Values)
 		{
-			PlanOutputs.Add(Pair.Key, Pair.Value->AsString());
+			PlanOutputs.Add(FString(*Pair.Key), Pair.Value->AsString());
 		}
 	}
 
@@ -465,6 +490,7 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 	PoolRemap.Reset();
 	{
 		const uint64 ResPx = uint64(GetResolution()) * uint64(GetResolution());
+		TSet<FString> CountedPassResources;
 		auto FormatBpp = [](const FString& Token) -> uint64 {
 			if (Token == TEXT("rgba32float")) return 16;
 			if (Token == TEXT("rgba16float")) return 8;
@@ -479,7 +505,18 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 				PredictedResidentBytes += ResPx * FormatBpp(ComputeFormat ? *ComputeFormat : P.ComputeFormat);
 			}
 			if (P.bDither8Bit) PredictedResidentBytes += ResPx * 4;
-			if (P.Passes > 1)
+			if (P.bClearPassOutputs)
+			{
+				for (const auto& Resource : P.PassResources)
+				{
+					if (!CountedPassResources.Contains(Resource.Key))
+					{
+						PredictedResidentBytes += uint64(Resource.Value.Width) * Resource.Value.Height * 16;
+						CountedPassResources.Add(Resource.Key);
+					}
+				}
+			}
+			else if (P.Passes > 1)
 			{
 				PredictedResidentBytes += 2 * ResPx * 16;
 				PredictedResidentBytes += uint64(FMath::Max(P.Outputs.Num() - 1, 0)) * ResPx * 16;
@@ -529,7 +566,7 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			{
 				for (const auto& A : (*AssignObj)->Values)
 				{
-					Out.Assign.Add(A.Key, int32(A.Value->AsNumber()));
+					Out.Assign.Add(FString(*A.Key), int32(A.Value->AsNumber()));
 				}
 			}
 			if (Obj->TryGetArrayField(TEXT("free_after"), Arr))
@@ -660,7 +697,7 @@ bool ParseHashMapJson(const FFfiString& Json, TMap<FString, FString>& OutMap)
 		FString Value;
 		if (Pair.Value->TryGetString(Value))
 		{
-			OutMap.Add(Pair.Key, Value);
+			OutMap.Add(FString(*Pair.Key), Value);
 		}
 	}
 	return true;
@@ -792,13 +829,14 @@ void FAqueductGraphExecutor::CreateMippedPoolSlots(
 }
 
 FTextureRHIRef FAqueductGraphExecutor::GetOrCreateNodeTexture(
-	const FString& NodeId, const FString& Format, uint32 Resolution, bool bMipmapped)
+	const FString& NodeId, const FString& Format, uint32 Width, uint32 Height, bool bMipmapped)
 {
 	const FString& Key = ResolvePoolKey(NodeId);
 	FAqueductTexture* Existing = NodeTextures.Find(Key);
-	const uint32 RequiredMips = bMipmapped ? FMath::FloorLog2(Resolution) + 1 : 1;
-	if (Existing && Existing->Resolution == Resolution && Existing->FormatStr == Format &&
-		Existing->Texture.IsValid() && Existing->Texture->GetNumMips() >= RequiredMips)
+	const uint32 RequiredMips = bMipmapped ? FMath::FloorLog2(FMath::Max(Width, Height)) + 1 : 1;
+	if (Existing && Existing->Resolution == Width && Existing->FormatStr == Format &&
+		Existing->Texture.IsValid() && Existing->Texture->GetSizeY() == Height &&
+		Existing->Texture->GetNumMips() >= RequiredMips)
 	{
 		return Existing->Texture;
 	}
@@ -807,7 +845,7 @@ FTextureRHIRef FAqueductGraphExecutor::GetOrCreateNodeTexture(
 
 	const FRHITextureCreateDesc Desc =
 		FRHITextureCreateDesc::Create2D(TEXT("AqueductNode"))
-		.SetExtent(Resolution, Resolution)
+		.SetExtent(Width, Height)
 		.SetFormat(PixelFormat)
 		.SetNumMips(RequiredMips)
 		.SetFlags(ETextureCreateFlags::ShaderResource | ETextureCreateFlags::UAV)
@@ -818,7 +856,7 @@ FTextureRHIRef FAqueductGraphExecutor::GetOrCreateNodeTexture(
 	FAqueductTexture Entry;
 	Entry.Texture = Texture;
 	Entry.FormatStr = Format;
-	Entry.Resolution = Resolution;
+	Entry.Resolution = Width;
 	NodeTextures.Add(Key, MoveTemp(Entry));
 
 	return Texture;
