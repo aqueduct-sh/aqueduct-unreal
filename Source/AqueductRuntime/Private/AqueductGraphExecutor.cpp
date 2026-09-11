@@ -456,7 +456,8 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 	{
 		for (const auto& Pair : (*Outputs)->Values)
 		{
-			PlanOutputs.Add(FString(*Pair.Key), Pair.Value->AsString());
+			// Explicit single-output references (node.output) alias the bare runtime node key.
+			PlanOutputs.Add(FString(*Pair.Key), RuntimeTextureKey(Pair.Value->AsString()));
 		}
 	}
 
