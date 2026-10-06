@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "0.1.10",
+	"VersionName": "0.1.11",
 	"FriendlyName": "Aqueduct",
 	"Description": "Procedural material engine. Live-linked to the Aqueduct editor.",
 	"Category": "Textures",

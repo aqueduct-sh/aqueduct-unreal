@@ -100,6 +100,7 @@ struct FCompiledMipChain
 /** One semantic output conversion for a multi-pass node. */
 struct FCompiledFormatConvert
 {
+	bool bClampOutput = true;
 	FTextureRHIRef SrcTexture;   // primary ping/pong or secondary staging (rgba32float)
 	FTextureRHIRef DstTexture;   // semantic's actual output texture
 	uint32 Resolution = 0;

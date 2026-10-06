@@ -34,6 +34,7 @@ public:
 		SHADER_PARAMETER_SRV(Texture2D, InputTexture)
 		SHADER_PARAMETER_UAV(RWTexture2D<float4>, OutputTexture)
 		SHADER_PARAMETER(uint32, bReplicateR)
+		SHADER_PARAMETER(uint32, bClampOutput)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)

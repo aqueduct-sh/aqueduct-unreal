@@ -51,14 +51,18 @@ void FAqueductGraphExecutor::RemoveDeletedNodes(const TSet<FString>& ValidNodeId
 	TSet<FString> LivePassResources;
 	for (const auto& Node : PlanNodes)
 	{
-		for (const auto& Resource : Node.Value.PassResources)
+		if (!Node.Value.UsesStaging()) continue;
+		for (const auto& Pass : Node.Value.SizedPasses)
 		{
-			LivePassResources.Add(Resource.Key);
+			for (const auto& Output : Pass.Outputs)
+			{
+				LivePassResources.Add(Output.Value);
+			}
 		}
 	}
 	for (const auto& Pair : NodeTextures)
 	{
-		if (Pair.Key.StartsWith(TEXT("_multipass.sized_")) && !LivePassResources.Contains(Pair.Key))
+		if (Pair.Key.StartsWith(TEXT("_multipass.")) && !LivePassResources.Contains(Pair.Key))
 		{
 			DoomedTextures.Add(Pair.Key);
 			continue;
@@ -403,6 +407,7 @@ FString FAqueductGraphExecutor::ExportPrecompiledMetadataJson() const
 		const FNodeShaderData& Data = Pair.Value;
 		TSharedRef<FJsonObject> Node = MakeShared<FJsonObject>();
 		Node->SetStringField(TEXT("nodeId"), Pair.Key);
+		Node->SetStringField(TEXT("definitionHash"), Data.DefinitionHash);
 		Node->SetNumberField(TEXT("permutationIndex"), Data.PermutationIndex);
 
 		auto ToStringArray = [](const TArray<FString>& Items)
@@ -429,7 +434,8 @@ FString FAqueductGraphExecutor::ExportPrecompiledMetadataJson() const
 	}
 
 	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-	Root->SetNumberField(TEXT("version"), 2);
+	Root->SetNumberField(TEXT("version"), 3);
+	Root->SetStringField(TEXT("shaderCompilationId"), FfiToString(aqueduct_shader_compilation_id()));
 	Root->SetArrayField(TEXT("nodes"), NodeArray);
 
 	FString Json;
@@ -454,6 +460,17 @@ bool FAqueductGraphExecutor::LoadPrecompiledMetadata(const FString& MetadataJson
 		return false;
 	}
 
+	double Version = 0;
+	FString CompilationId;
+	const FString CurrentCompilationId = FfiToString(aqueduct_shader_compilation_id());
+	if (!Root->TryGetNumberField(TEXT("version"), Version) || Version != 3 ||
+		!Root->TryGetStringField(TEXT("shaderCompilationId"), CompilationId) ||
+		CurrentCompilationId.IsEmpty() || CompilationId != CurrentCompilationId)
+	{
+		UE_LOG(LogAqueduct, Error, TEXT("Cooked Aqueduct shaders are incompatible with this runtime. Recook the asset with the current Aqueduct plugin."));
+		return false;
+	}
+
 	const TArray<TSharedPtr<FJsonValue>>* NodeArray = nullptr;
 	if (!Root->TryGetArrayField(TEXT("nodes"), NodeArray) || !NodeArray)
 	{
@@ -472,11 +489,11 @@ bool FAqueductGraphExecutor::LoadPrecompiledMetadata(const FString& MetadataJson
 		return Out;
 	};
 
-	NodeShaders.Empty();
+	TMap<FString, FNodeShaderData> LoadedShaders;
 	for (const TSharedPtr<FJsonValue>& Entry : *NodeArray)
 	{
 		const TSharedPtr<FJsonObject> Node = Entry->AsObject();
-		if (!Node.IsValid()) continue;
+		if (!Node.IsValid()) return false;
 
 		FNodeShaderData Data;
 		Data.PermutationIndex = (int32)Node->GetNumberField(TEXT("permutationIndex"));
@@ -499,19 +516,27 @@ bool FAqueductGraphExecutor::LoadPrecompiledMetadata(const FString& MetadataJson
 
 		FString MetaNodeId;
 		Node->TryGetStringField(TEXT("nodeId"), MetaNodeId);  // cooked metadata: non-throwing
-		if (MetaNodeId.IsEmpty()) continue;
-
-		// The plan supplies the definition-driven facts the metadata used to
-		// duplicate (passes, mip inputs, defaults, hash).
-		if (const FExecutionPlanNode* Plan = PlanNodes.Find(MetaNodeId))
+		const FExecutionPlanNode* Plan = PlanNodes.Find(MetaNodeId);
+		FString DefinitionHash;
+		if (!Plan || LoadedShaders.Contains(MetaNodeId) ||
+			!Node->TryGetStringField(TEXT("definitionHash"), DefinitionHash) ||
+			DefinitionHash != Plan->DefinitionHash)
 		{
-			Data.Passes = Plan->Passes;
-			Data.MipmappedInputs = Plan->MipmappedInputs;
-			Data.InputDefaults = Plan->InputDefaults;
-			Data.DefinitionHash = Plan->DefinitionHash;
+			UE_LOG(LogAqueduct, Error, TEXT("Cooked Aqueduct shader for '%s' does not match its node definition. Recook the asset."), *MetaNodeId);
+			return false;
 		}
-		NodeShaders.Add(MetaNodeId, MoveTemp(Data));
+		Data.Passes = Plan->Passes;
+		Data.MipmappedInputs = Plan->MipmappedInputs;
+		Data.InputDefaults = Plan->InputDefaults;
+		Data.DefinitionHash = DefinitionHash;
+		LoadedShaders.Add(MetaNodeId, MoveTemp(Data));
 	}
+	if (LoadedShaders.Num() != PlanOrder.Num())
+	{
+		UE_LOG(LogAqueduct, Error, TEXT("Cooked Aqueduct shader metadata has an incomplete node set. Recook the asset."));
+		return false;
+	}
+	NodeShaders = MoveTemp(LoadedShaders);
 
 	// Shaders already live in the cooked global shader map at these
 	// permutation indices — no compilation, no VerifyGlobalShaders.

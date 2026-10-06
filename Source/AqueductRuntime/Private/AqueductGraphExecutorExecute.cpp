@@ -37,7 +37,8 @@ void FAqueductGraphExecutor::DispatchFormatConvert(
 	FRHICommandListImmediate& RHICmdList,
 	FTextureRHIRef SrcTexture,
 	FTextureRHIRef DstTexture,
-	uint32 Resolution) const
+	uint32 Resolution,
+	bool bClampOutput) const
 {
 	TShaderMapRef<FAqueductBlitCS> BlitShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 	if (!ensure(BlitShader.IsValid())) return;
@@ -62,6 +63,7 @@ void FAqueductGraphExecutor::DispatchFormatConvert(
 	FAqueductBlitCS::FParameters PassParameters;
 	PassParameters.InputTexture = SrcSRV;
 	PassParameters.OutputTexture = DstUAV;
+	PassParameters.bClampOutput = bClampOutput ? 1 : 0;
 	PassParameters.bReplicateR = 0; // executor-internal converts are format moves, not display expansion
 
 	const uint32 GroupCount = FMath::DivideAndRoundUp(Resolution, (uint32)WORKGROUP_SIZE);
@@ -297,11 +299,10 @@ void FAqueductGraphExecutor::ExecuteFull(FRHICommandListImmediate& RHICmdList)
 		{
 			const FString TextureKey = bMultiOutput ? NodeId + TEXT(".") + OutSem : NodeId;
 			const FString* DestinationFormat = Plan.Formats.Find(OutSem);
-			const FString* ComputeFormat = Plan.ComputeFormats.Find(OutSem);
+			const FString* StorageFormat = Plan.StorageFormats.Find(OutSem);
 			ResolvedFormats.Add(TextureKey, DestinationFormat ? *DestinationFormat : Plan.Format);
-			const FString& AllocationFormat = (Plan.Passes > 1 || Plan.bClearPassOutputs)
-				? (DestinationFormat ? *DestinationFormat : Plan.Format)
-				: (ComputeFormat ? *ComputeFormat : Plan.ComputeFormat);
+			if (!ensure(StorageFormat)) return;
+			const FString& AllocationFormat = *StorageFormat;
 			GetOrCreateNodeTexture(TextureKey, AllocationFormat,
 				Resolution, Resolution, MipRequiredTextureKeys.Contains(TextureKey));
 		}
@@ -316,13 +317,16 @@ void FAqueductGraphExecutor::ExecuteFull(FRHICommandListImmediate& RHICmdList)
 					Resource.Value.Width, Resource.Value.Height);
 			}
 		}
-		else if (Plan.Passes > 1)
+		else if (Plan.UsesStaging())
 		{
 			GetOrCreateNodeTexture(GSharedPingKey, TEXT("rgba32float"), Resolution, Resolution);
-			GetOrCreateNodeTexture(GSharedPongKey, TEXT("rgba32float"), Resolution, Resolution);
+			if (Plan.Passes > 1)
+			{
+				GetOrCreateNodeTexture(GSharedPongKey, TEXT("rgba32float"), Resolution, Resolution);
+			}
 			for (int32 OutputIndex = 1; OutputIndex < Plan.Outputs.Num(); ++OutputIndex)
 			{
-				GetOrCreateNodeTexture(NodeId + TEXT(".__stage_") + Plan.Outputs[OutputIndex],
+				GetOrCreateNodeTexture(FString::Printf(TEXT("_multipass.output_%d"), OutputIndex),
 					TEXT("rgba32float"), Resolution, Resolution);
 			}
 		}
@@ -482,7 +486,7 @@ void FAqueductGraphExecutor::ExecuteFull(FRHICommandListImmediate& RHICmdList)
 		UE_LOG(LogAqueduct, Log, TEXT("Dispatching node %d/%d: %s"), Idx + 1, ExecutionOrder.Num(), *NodeId);
 		if (ShaderData)
 		{
-			if (ShaderData->Passes > 1 || PlanNodes[NodeId].bClearPassOutputs)
+			if (PlanNodes[NodeId].UsesStaging())
 			{
 				DispatchMultiPassNode(RHICmdList, NodeId, *ShaderData, Resolution);
 			}
@@ -969,7 +973,7 @@ void FAqueductGraphExecutor::DispatchDynamicNode(
 
 	const FExecutionPlanNode* Plan = PlanNodes.Find(NodeId);
 	if (!ensure(Plan)) return;
-	const bool bStaged = ShaderData.Passes > 1 || Plan->bClearPassOutputs;
+	const bool bStaged = Plan->UsesStaging();
 	const bool bMultiOutput = ShaderData.OutputSemantics.Num() > 1;
 	FUnorderedAccessViewRHIRef OutputUAVs[MAX_NODE_OUTPUTS];
 	FTextureRHIRef BoundOutputs[MAX_NODE_OUTPUTS];
@@ -1257,7 +1261,7 @@ FString FAqueductGraphExecutor::ResolvePassOutputKey(
 	}
 	return OutputIndex == 0
 		? FString(PassIndex % 2 == 0 ? GSharedPingKey : GSharedPongKey)
-		: NodeId + TEXT(".__stage_") + Semantic;
+		: FString::Printf(TEXT("_multipass.output_%d"), OutputIndex);
 }
 
 void FAqueductGraphExecutor::DispatchMultiPassNode(
@@ -1302,7 +1306,7 @@ void FAqueductGraphExecutor::DispatchMultiPassNode(
 		FAqueductTexture* DstEntry = NodeTextures.Find(ResolvePoolKey(DestinationKey));
 		if (SrcEntry && DstEntry && SrcEntry->Texture.IsValid() && DstEntry->Texture.IsValid())
 		{
-			DispatchFormatConvert(RHICmdList, SrcEntry->Texture, DstEntry->Texture, Resolution);
+			DispatchFormatConvert(RHICmdList, SrcEntry->Texture, DstEntry->Texture, Resolution, PlanNodes[NodeId].bClampOutput);
 		}
 	}
 

@@ -275,7 +275,7 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 			for (int32 i = 0; i < SD->OutputSemantics.Num() && i < MAX_NODE_OUTPUTS; i++)
 			{
 				FString TexKey;
-				if (TotalPasses > 1 || NodePlan.bClearPassOutputs)
+				if (NodePlan.UsesStaging())
 				{
 					TexKey = ResolvePassOutputKey(NodeId, SD->OutputSemantics[i], i, PassIdx);
 				}
@@ -366,7 +366,7 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 			return D;
 		};
 
-		if (SD->Passes > 1 || NodePlan.bClearPassOutputs)
+		if (NodePlan.UsesStaging())
 		{
 			for (uint32 Pass = 0; Pass < SD->Passes; Pass++)
 			{
@@ -381,7 +381,7 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 		CG->NodeDispatchRanges.Add(TPair<uint32, uint32>(DispatchStart, CG->Dispatches.Num()));
 
 		// Build one format conversion entry per multi-pass semantic.
-		if (SD->Passes > 1 || NodePlan.bClearPassOutputs)
+		if (NodePlan.UsesStaging())
 		{
 			const bool bMultiOutput = SD->OutputSemantics.Num() > 1;
 			for (int32 OutputIndex = 0; OutputIndex < SD->OutputSemantics.Num(); ++OutputIndex)
@@ -398,6 +398,7 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 					FC.DstTexture = DstEntry->Texture;
 					FC.Resolution = Resolution;
 					FC.NodeIndex = NodeIdx;
+					FC.bClampOutput = NodePlan.bClampOutput;
 					CG->FormatConverts.Add(MoveTemp(FC));
 				}
 			}
@@ -583,7 +584,7 @@ void FAqueductGraphExecutor::ReplayCompiledGraph(FRHICommandListImmediate& RHICm
 			ConvertEndQuery = RHICreateRenderQuery(RQT_AbsoluteTime);
 			RHICmdList.EndRenderQuery(ConvertStartQuery);
 		}
-		DispatchFormatConvert(RHICmdList, FC.SrcTexture, FC.DstTexture, FC.Resolution);
+		DispatchFormatConvert(RHICmdList, FC.SrcTexture, FC.DstTexture, FC.Resolution, FC.bClampOutput);
 		LastPipelineId = UINT32_MAX; // convert changed pipeline
 		if (bProfilePerNode)
 		{

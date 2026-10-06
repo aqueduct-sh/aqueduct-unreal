@@ -12,6 +12,13 @@
 Texture2D<float4> InputTexture;
 RWTexture2D<float4> OutputTexture;
 uint bReplicateR;
+uint bClampOutput;
+
+float BoundedComponent(float Value)
+{
+    uint Bits = asuint(Value);
+    return asfloat(Bits > 0x7f800000u ? 0u : min(Bits, 0x3f800000u));
+}
 
 [numthreads(16, 16, 1)]
 void BlitCS(uint3 DTid : SV_DispatchThreadID)
@@ -24,6 +31,11 @@ void BlitCS(uint3 DTid : SV_DispatchThreadID)
     if (bReplicateR != 0)
     {
         Color = float4(Color.r, Color.r, Color.r, 1.0);
+    }
+    if (bClampOutput != 0)
+    {
+        Color = float4(BoundedComponent(Color.r), BoundedComponent(Color.g),
+                       BoundedComponent(Color.b), BoundedComponent(Color.a));
     }
     OutputTexture[DTid.xy] = Color;
 }

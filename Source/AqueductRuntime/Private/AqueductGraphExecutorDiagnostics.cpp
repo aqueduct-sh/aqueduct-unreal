@@ -227,13 +227,6 @@ const TCHAR* ClassifyVramTextureKey(const FString& Key, FString& OutNodeId)
 		OutNodeId.Reset();
 		return TEXT("pool");
 	}
-	if (Key.EndsWith(TEXT(".__proxy")))
-	{
-		// Pinned display proxies exist only on interactive engine backends;
-		// classified here to keep the category contract mirrored.
-		OutNodeId = AqueductVramNodeOf(Key);
-		return TEXT("proxy");
-	}
 	if (Key.StartsWith(TEXT("_multipass.")) || Key.Contains(TEXT(".__stage_")))
 	{
 		OutNodeId = AqueductVramNodeOf(Key);

@@ -209,7 +209,8 @@ public:
 
 	/**
 	 * Serialize the per-node shader metadata (permutation indices, binding
-	 * semantics, params, passes) to JSON. Valid after CompileAllShaders.
+	 * semantics, params, compilation identity and definition hashes) to JSON.
+	 * Valid after CompileAllShaders.
 	 * Written into UAqueductGraph assets at cook time so shipped games can
 	 * execute graphs without any shader compilation.
 	 */
@@ -219,6 +220,8 @@ public:
 	 * Populate shader metadata from cook-time JSON instead of compiling.
 	 * The shaders must already exist in the cooked global shader map at the
 	 * recorded permutation indices. Call after LoadRegistry + LoadGraph.
+	 * Rejects incompatible compilation identities or node definitions; recook
+	 * with the current plugin before loading those assets.
 	 * No slangc, no UE shader compilation, no disk access.
 	 */
 	bool LoadPrecompiledMetadata(const FString& MetadataJson);
@@ -420,11 +423,14 @@ private:
 		FString ComputeFormat; // compute-texture format (narrow formats compute wide)
 		TMap<FString, FString> Formats;        // semantic -> destination format
 		TMap<FString, FString> ComputeFormats; // semantic -> dispatch format
+		TMap<FString, FString> StorageFormats; // semantic -> canonical storage before delivery
 		uint32 Passes = 1;
 		TArray<FNodeDispatchSize> Dispatch;
 		TMap<FString, FNodeDispatchSize> PassResources;
 		TArray<FResolvedPass> SizedPasses;
 		bool bClearPassOutputs = false;
+		bool bClampOutput = true;
+		bool UsesStaging() const { return Passes > 1 || bClearPassOutputs; }
 		TArray<FString> Outputs;
 		TMap<FString, FString> Inputs; // semantic -> resolved source texture key
 		TMap<FString, FLinearColor> InputDefaults;
@@ -621,7 +627,8 @@ private:
 		FRHICommandListImmediate& RHICmdList,
 		FTextureRHIRef SrcTexture,
 		FTextureRHIRef DstTexture,
-		uint32 Resolution) const;
+		uint32 Resolution,
+		bool bClampOutput) const;
 
 	/** Remove NodeShaders/NodeTextures entries for nodes not in ValidNodeIds. */
 	void RemoveDeletedNodes(const TSet<FString>& ValidNodeIds);

@@ -264,7 +264,7 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 		return false;
 	}
 
-	const FString PlanJson = FfiToString(aqueduct_graph_execution_plan_json_versioned(Graph, Registry, 1));
+	const FString PlanJson = FfiToString(aqueduct_graph_execution_plan_json_versioned(Graph, Registry, 2));
 	if (PlanJson.IsEmpty())
 	{
 		UE_LOG(LogAqueduct, Error, TEXT("Execution plan failed: %s"), *GetLastError());
@@ -298,6 +298,7 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			Node->TryGetStringField(TEXT("kind"), Entry.Kind);
 			Node->TryGetStringField(TEXT("format"), Entry.Format);
 			Node->TryGetStringField(TEXT("compute_format"), Entry.ComputeFormat);
+			if (!ensure(Node->TryGetBoolField(TEXT("clamp_output"), Entry.bClampOutput))) return false;
 			const TSharedPtr<FJsonObject>* Formats = nullptr;
 			if (Node->TryGetObjectField(TEXT("formats"), Formats))
 			{
@@ -318,6 +319,12 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			double Passes = 1.0;
 			Node->TryGetNumberField(TEXT("passes"), Passes);
 			Entry.Passes = FMath::Max(1u, (uint32)Passes);
+			const TSharedPtr<FJsonObject>* StorageFormats = nullptr;
+			if (!ensure(Node->TryGetObjectField(TEXT("storage_formats"), StorageFormats))) return false;
+			for (const auto& Pair : (*StorageFormats)->Values)
+			{
+				Entry.StorageFormats.Add(FString(*Pair.Key), Pair.Value->AsString());
+			}
 			const TArray<TSharedPtr<FJsonValue>>* Dispatch = nullptr;
 			if (Node->TryGetArrayField(TEXT("dispatch"), Dispatch))
 			{
@@ -340,7 +347,7 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			const TSharedPtr<FJsonObject>* PassPlan = nullptr;
 			if (Node->TryGetObjectField(TEXT("pass_plan"), PassPlan))
 			{
-				if (!ensure((*PassPlan)->GetIntegerField(TEXT("version")) == 1)) return false;
+				if (!ensure((*PassPlan)->GetIntegerField(TEXT("version")) == 2)) return false;
 				Entry.bClearPassOutputs = (*PassPlan)->GetBoolField(TEXT("clear_outputs"));
 				for (const auto& ResourceValue : (*PassPlan)->GetArrayField(TEXT("resources")))
 				{
@@ -492,6 +499,8 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 	{
 		const uint64 ResPx = uint64(GetResolution()) * uint64(GetResolution());
 		TSet<FString> CountedPassResources;
+		int32 SharedPrimaryCount = 0;
+		int32 SharedSecondaryCount = 0;
 		auto FormatBpp = [](const FString& Token) -> uint64 {
 			if (Token == TEXT("rgba32float")) return 16;
 			if (Token == TEXT("rgba16float")) return 8;
@@ -502,8 +511,9 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			const FExecutionPlanNode& P = Pair.Value;
 			for (const FString& Semantic : P.Outputs)
 			{
-				const FString* ComputeFormat = P.ComputeFormats.Find(Semantic);
-				PredictedResidentBytes += ResPx * FormatBpp(ComputeFormat ? *ComputeFormat : P.ComputeFormat);
+				const TMap<FString, FString>& AllocatedFormats = P.StorageFormats;
+				const FString* AllocatedFormat = AllocatedFormats.Find(Semantic);
+				PredictedResidentBytes += ResPx * FormatBpp(AllocatedFormat ? *AllocatedFormat : P.Format);
 			}
 			if (P.bDither8Bit) PredictedResidentBytes += ResPx * 4;
 			if (P.bClearPassOutputs)
@@ -517,12 +527,13 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 					}
 				}
 			}
-			else if (P.Passes > 1)
+			else if (P.UsesStaging())
 			{
-				PredictedResidentBytes += 2 * ResPx * 16;
-				PredictedResidentBytes += uint64(FMath::Max(P.Outputs.Num() - 1, 0)) * ResPx * 16;
+				SharedPrimaryCount = FMath::Max(SharedPrimaryCount, P.Passes > 1 ? 2 : 1);
+				SharedSecondaryCount = FMath::Max(SharedSecondaryCount, P.Outputs.Num() - 1);
 			}
 		}
+		PredictedResidentBytes += uint64(SharedPrimaryCount + SharedSecondaryCount) * ResPx * 16;
 		for (const FString& SourceKey : MipRequiredTextureKeys)
 		{
 			FString ProducerId = SourceKey;
@@ -535,7 +546,7 @@ bool FAqueductGraphExecutor::LoadExecutionPlan()
 			FString Semantic = TEXT("output");
 			int32 SemanticDot = INDEX_NONE;
 			if (SourceKey.FindChar(TEXT('.'), SemanticDot)) Semantic = SourceKey.Mid(SemanticDot + 1);
-			const FString* ProducerFormat = Producer ? Producer->ComputeFormats.Find(Semantic) : nullptr;
+			const FString* ProducerFormat = Producer ? (Producer->StorageFormats).Find(Semantic) : nullptr;
 			const uint64 Bpp = FormatBpp(ProducerFormat ? *ProducerFormat : (Producer ? Producer->ComputeFormat : TEXT("rgba16float")));
 			uint32 Side = GetResolution();
 			while (Side > 1)
