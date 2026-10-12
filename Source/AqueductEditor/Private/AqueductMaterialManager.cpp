@@ -27,6 +27,7 @@
 #include "Materials/MaterialExpressionMultiply.h"
 #include "Materials/MaterialExpressionLinearInterpolate.h"
 #include "Materials/MaterialExpressionMax.h"
+#include "Materials/MaterialExpressionClamp.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialExpressionTextureCoordinate.h"
@@ -58,6 +59,9 @@
 #include "Dom/JsonObject.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogAqueductMaterial, Log, All);
+
+static const TCHAR* GBaseMaterialPath = TEXT("/Game/Aqueduct/M_Aqueduct_Base");
+static const TCHAR* GTranslucentMaterialPath = TEXT("/Game/Aqueduct/M_Aqueduct_Translucent");
 
 // Non-realtime editor viewports (material/MI editor previews are realtime
 // only while the lighting rig rotates) repaint solely on invalidation. Live
@@ -95,6 +99,7 @@ static const FDeliveryParamDef GDeliveryParamMap[] = {
 	{TEXT("orm"),        FName("ORM")},
 	{TEXT("height"),     FName("Height")},
 	{TEXT("emissive"),   FName("Emissive")},
+	{TEXT("opacity"),    FName("Opacity")},
 };
 
 static const FName* FindParamNameForDelivery(const FString& DeliveryName)
@@ -778,6 +783,18 @@ bool FAqueductMaterialManager::ReloadGraphFromFile(const FString& GraphFilePath)
 		UE_LOG(LogAqueductMaterial, Error, TEXT("ReloadGraphFromFile: cannot create material instance for %s"), *FullPath);
 		return false;
 	}
+	// Only switch Aqueduct-owned parents. A user-authored parent is authoritative.
+	const FString ParentPackage = MIC->Parent ? MIC->Parent->GetOutermost()->GetName() : FString();
+	if (ParentPackage == GBaseMaterialPath || ParentPackage == GTranslucentMaterialPath)
+	{
+		const FResolvedOutputBinding Opacity = ResolveScalarBinding(OutputBindings, {TEXT("opacity")}, 1.0f);
+		const bool bTranslucent = Opacity.bTexture || (FMath::IsFinite(Opacity.Scalar) && Opacity.Scalar < 1.0f);
+		UMaterial* DesiredParent = GetOrCreateBaseMaterial(bTranslucent);
+		if (ensure(DesiredParent) && MIC->Parent != DesiredParent)
+		{
+			MIC->SetParentEditorOnly(DesiredParent);
+		}
+	}
 	ApplyOutputBindingsToMIC(OutputBindings, Executor->GetNormalFormat(), MIC);
 
 	Executor->EvaluateTimeExpressions();
@@ -1069,7 +1086,7 @@ void FAqueductMaterialManager::OnDirectoryChanged(const TArray<FFileChangeData>&
 // Base material
 // ---------------------------------------------------------------------------
 
-static const TCHAR* GBaseMaterialPath = TEXT("/Game/Aqueduct/M_Aqueduct_Base");
+
 
 /**
  * Neutral default texture per map kind, assigned to the base material's
@@ -1111,7 +1128,7 @@ static UTexture2D* GetOrCreateDefaultTexture(
 		break;
 	}
 	case EAqueductMapKind::Gray:
-		Pixels.Init(128, Size * Size);
+		Pixels.Init(FCString::Strcmp(Suffix, TEXT("Opacity")) == 0 ? 255 : 128, Size * Size);
 		break;
 	case EAqueductMapKind::Orm:
 	{
@@ -1211,6 +1228,7 @@ static void ApplyOutputBindingsToMIC(
 	const FResolvedOutputBinding Roughness = ResolveScalarBinding(Outputs, {TEXT("roughness")}, 0.5f);
 	const FResolvedOutputBinding Metallic = ResolveScalarBinding(Outputs, {TEXT("metallic")}, 0.0f);
 	const FResolvedOutputBinding Ao = ResolveScalarBinding(Outputs, {TEXT("ao")}, 1.0f);
+	const FResolvedOutputBinding Opacity = ResolveScalarBinding(Outputs, {TEXT("opacity")}, 1.0f);
 	const FResolvedOutputBinding Emissive = ResolveVectorBinding(
 		Outputs, {TEXT("emissive")}, FLinearColor::Black);
 	const FResolvedOutputBinding Luminance = ResolveScalarBinding(
@@ -1248,6 +1266,8 @@ static void ApplyOutputBindingsToMIC(
 	SetScalar(TEXT("MetallicUseTexture"), Metallic.bTexture ? 1.0f : 0.0f);
 	SetScalar(TEXT("AoConstant"), Ao.Scalar);
 	SetScalar(TEXT("AoUseTexture"), Ao.bTexture ? 1.0f : 0.0f);
+	SetScalar(TEXT("OpacityConstant"), FMath::IsFinite(Opacity.Scalar) ? FMath::Clamp(Opacity.Scalar, 0.0f, 1.0f) : 1.0f);
+	SetScalar(TEXT("OpacityUseTexture"), Opacity.bTexture ? 1.0f : 0.0f);
 	SetVector(TEXT("EmissiveConstant"), DecodeAqueductColor(Emissive.Vector));
 	SetScalar(TEXT("EmissiveUseTexture"), Emissive.bTexture ? 1.0f : 0.0f);
 	SetScalar(TEXT("EmissionLuminanceNits"), Luminance.Scalar);
@@ -1282,7 +1302,7 @@ static TExpression* AddMaterialExpression(UMaterial* Mat, int32 X, int32 Y)
  *  idempotent; only the exact owned material calls this function. */
 static bool ReconcileAqueductBaseMaterial(UMaterial* Mat, UMaterialExpressionMultiply* TilingMul)
 {
-	constexpr float SchemaVersion = 2.0f;
+	constexpr float SchemaVersion = 3.0f;
 	UMaterialExpressionScalarParameter* ExistingSchema =
 		FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("AqueductSchemaVersion"));
 	const bool bRequiredParametersPresent =
@@ -1298,13 +1318,15 @@ static bool ReconcileAqueductBaseMaterial(UMaterial* Mat, UMaterialExpressionMul
 		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("MetallicUseTexture"))
 		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("AoConstant"))
 		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("AoUseTexture"))
+		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("OpacityConstant"))
+		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("OpacityUseTexture"))
 		&& FindParameterExpression<UMaterialExpressionVectorParameter>(Mat, FName("EmissiveConstant"))
 		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("EmissiveUseTexture"))
 		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("EmissionLuminanceNits"));
 	const UMaterialEditorOnlyData* ExistingEditorData = Mat->GetEditorOnlyData();
 	if (ExistingSchema && ExistingSchema->DefaultValue >= SchemaVersion
 		&& bRequiredParametersPresent && ExistingEditorData
-		&& ExistingEditorData->EmissiveColor.Expression)
+		&& ExistingEditorData->EmissiveColor.Expression && ExistingEditorData->Opacity.Expression)
 	{
 		return false;
 	}
@@ -1398,6 +1420,13 @@ static bool ReconcileAqueductBaseMaterial(UMaterial* Mat, UMaterialExpressionMul
 	Emission->A.Connect(0, EmissiveNonnegative);
 	Emission->B.Connect(0, LuminanceNonnegative);
 
+	auto* OpacityTexture = EnsureTexture(TEXT("Opacity"), SAMPLERTYPE_LinearGrayscale, EAqueductMapKind::Gray, 950);
+	auto* Opacity = Lerp(Scalar(TEXT("OpacityConstant"), 1.0f, 950), 0, OpacityTexture, 1,
+		Scalar(TEXT("OpacityUseTexture"), 0.0f, 990), 950);
+	auto* OpacityClamped = AddMaterialExpression<UMaterialExpressionClamp>(Mat, 260, 950);
+	OpacityClamped->Input.Connect(0, Opacity);
+	OpacityClamped->MinDefault = 0.0f;
+	OpacityClamped->MaxDefault = 1.0f;
 	auto* Schema = Scalar(TEXT("AqueductSchemaVersion"), SchemaVersion, 850);
 	Schema->DefaultValue = SchemaVersion;
 
@@ -1409,15 +1438,18 @@ static bool ReconcileAqueductBaseMaterial(UMaterial* Mat, UMaterialExpressionMul
 		EditorData->Roughness.Connect(0, Roughness);
 		EditorData->Metallic.Connect(0, Metallic);
 		EditorData->EmissiveColor.Connect(0, Emission);
+		EditorData->Opacity.Connect(0, OpacityClamped);
 	}
 	return true;
 }
 
-UMaterial* FAqueductMaterialManager::GetOrCreateBaseMaterial()
+UMaterial* FAqueductMaterialManager::GetOrCreateBaseMaterial(bool bTranslucent)
 {
-	if (BaseMaterial) return BaseMaterial;
+	UMaterial*& CachedMaterial = bTranslucent ? TranslucentMaterial : BaseMaterial;
+	if (CachedMaterial) return CachedMaterial;
+	const TCHAR* MaterialPath = bTranslucent ? GTranslucentMaterialPath : GBaseMaterialPath;
 
-	UMaterial* Mat = LoadObject<UMaterial>(nullptr, GBaseMaterialPath);
+	UMaterial* Mat = LoadObject<UMaterial>(nullptr, MaterialPath);
 	if (Mat)
 	{
 		auto* BaseTexture = FindParameterExpression<UMaterialExpressionTextureSampleParameter2D>(
@@ -1431,22 +1463,24 @@ UMaterial* FAqueductMaterialManager::GetOrCreateBaseMaterial()
 			Mat->PostEditChange();
 			Mat->MarkPackageDirty();
 			SaveAssetPackage(Mat);
-			UE_LOG(LogAqueductMaterial, Log, TEXT("Reconciled base material schema: %s"), GBaseMaterialPath);
+			UE_LOG(LogAqueductMaterial, Log, TEXT("Reconciled base material schema: %s"), MaterialPath);
 		}
-		BaseMaterial = Mat;
+		CachedMaterial = Mat;
 		return Mat;
 	}
 
 	FString DiskDir = FPaths::Combine(FPaths::ProjectContentDir(), TEXT("Aqueduct"));
 	IFileManager::Get().MakeDirectory(*DiskDir, true);
 
-	UPackage* Pkg = CreatePackage(GBaseMaterialPath);
+	UPackage* Pkg = CreatePackage(MaterialPath);
 	if (!Pkg) return nullptr;
 	Pkg->FullyLoad();
 
-	Mat = NewObject<UMaterial>(Pkg, TEXT("M_Aqueduct_Base"), RF_Public | RF_Standalone);
+	Mat = NewObject<UMaterial>(Pkg, bTranslucent ? TEXT("M_Aqueduct_Translucent") : TEXT("M_Aqueduct_Base"), RF_Public | RF_Standalone);
 	Mat->MaterialDomain = MD_Surface;
-	Mat->BlendMode = BLEND_Opaque;
+	Mat->BlendMode = bTranslucent ? BLEND_Translucent : BLEND_Opaque;
+	Mat->TranslucencyLightingMode = TLM_SurfacePerPixelLighting;
+	Mat->TwoSided = bTranslucent;
 	Mat->SetShadingModel(MSM_DefaultLit);
 
 	// Tiling: TexCoord × scalar parameter → shared UVs for all samplers
@@ -1521,8 +1555,8 @@ UMaterial* FAqueductMaterialManager::GetOrCreateBaseMaterial()
 	Pkg->MarkPackageDirty();
 	SaveAssetPackage(Mat);
 
-	UE_LOG(LogAqueductMaterial, Log, TEXT("Created base material: %s"), GBaseMaterialPath);
-	BaseMaterial = Mat;
+	UE_LOG(LogAqueductMaterial, Log, TEXT("Created base material: %s"), MaterialPath);
+	CachedMaterial = Mat;
 	return Mat;
 }
 

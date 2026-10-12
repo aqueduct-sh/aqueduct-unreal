@@ -45,7 +45,7 @@ EAqueductMapKind ClassifyOutput(const FString& OutputName, EPixelFormat SrcPF)
 	if (OutputName == TEXT("albedo")) return EAqueductMapKind::Color; // legacy name for base_color
 	if (OutputName == TEXT("emissive")) return EAqueductMapKind::Color;
 	if (OutputName == TEXT("normal")) return EAqueductMapKind::Normal;
-	if (OutputName == TEXT("height")) return EAqueductMapKind::Gray;
+	if (OutputName == TEXT("height") || OutputName == TEXT("opacity")) return EAqueductMapKind::Gray;
 	if (OutputName == OrmDeliveryName()) return EAqueductMapKind::Orm;
 	// Generic outputs: single-channel data is grayscale by core contract.
 	return SrcPF == PF_R32_FLOAT ? EAqueductMapKind::Gray : EAqueductMapKind::Color;

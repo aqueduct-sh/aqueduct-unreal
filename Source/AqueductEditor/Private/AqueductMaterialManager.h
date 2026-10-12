@@ -183,7 +183,7 @@ private:
 
 	struct FGraphState;  // defined below; referenced by the helpers above the definition
 
-	UMaterial* GetOrCreateBaseMaterial();
+	UMaterial* GetOrCreateBaseMaterial(bool bTranslucent = false);
 
 	/** Get the executor for a graph, creating + compiling one if needed. */
 	TSharedPtr<UE::Aqueduct::FAqueductGraphExecutor> GetOrCreateExecutor(
@@ -314,6 +314,7 @@ private:
 
 	TMap<FString, FGraphState> GraphStates;
 	UMaterial* BaseMaterial = nullptr;
+	UMaterial* TranslucentMaterial = nullptr;
 	FTSTicker::FDelegateHandle TickerHandle;
 	bool bInitialized = false;
 
