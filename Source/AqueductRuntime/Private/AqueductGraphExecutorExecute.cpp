@@ -793,6 +793,42 @@ FUnorderedAccessViewRHIRef FAqueductGraphExecutor::GetSharedScratchUAV(
 	return View;
 }
 
+FShaderResourceViewRHIRef FAqueductGraphExecutor::GetCurveParamSRV(
+	FRHICommandListImmediate& RHICmdList, const FString& NodeId, const FString& Name)
+{
+	TArray<float> Values;
+	Values.Add(0.f);
+	if (!Name.IsEmpty())
+	{
+		const auto Resolved = FfiJsonObject(aqueduct_graph_get_node_resolved_params_json(Graph, Registry, TCHAR_TO_UTF8(*NodeId)));
+		const TArray<TSharedPtr<FJsonValue>>* Array;
+		if (ensure(Resolved.IsValid()) && Resolved->TryGetArrayField(Name, Array))
+		{
+			Values.Reset();
+			for (const auto& Value : *Array) Values.Add(float(Value->AsNumber()));
+		}
+	}
+	auto& Entry = CurveParamBuffers.FindOrAdd(NodeId).FindOrAdd(Name);
+	if (Entry.SRV.IsValid() && Entry.Values == Values) return Entry.SRV;
+	const uint32 Bytes = FMath::RoundUpToPowerOfTwo(FMath::Max(16u, uint32(Values.Num() * sizeof(float))));
+	if (!Entry.Buffer.IsValid() || Entry.Buffer->GetSize() < Bytes)
+	{
+		const auto Desc = FRHIBufferCreateDesc::Create(TEXT("CurveParameter"), Bytes, sizeof(float), EBufferUsageFlags::StructuredBuffer)
+			.AddUsage(EBufferUsageFlags::ShaderResource | EBufferUsageFlags::Dynamic).SetInitialState(ERHIAccess::SRVCompute);
+		Entry.Buffer = RHICmdList.CreateBuffer(Desc);
+		if (!ensure(Entry.Buffer.IsValid())) return nullptr;
+		Entry.SRV = RHICmdList.CreateShaderResourceView(Entry.Buffer, FRHIViewDesc::CreateBufferSRV()
+			.SetType(FRHIViewDesc::EBufferType::Structured).SetStride(sizeof(float)));
+	}
+	void* Data = RHICmdList.LockBuffer(Entry.Buffer, 0, Bytes, RLM_WriteOnly);
+	if (!ensure(Data)) return nullptr;
+	FMemory::Memzero(Data, Bytes);
+	FMemory::Memcpy(Data, Values.GetData(), Values.Num() * sizeof(float));
+	RHICmdList.UnlockBuffer(Entry.Buffer);
+	Entry.Values = MoveTemp(Values);
+	return Entry.SRV;
+}
+
 void FAqueductGraphExecutor::ZeroFillScratchUAV(
 	FRHICommandListImmediate& RHICmdList, const FUnorderedAccessViewRHIRef& UAV)
 {
@@ -1139,6 +1175,12 @@ void FAqueductGraphExecutor::DispatchDynamicNode(
 	{
 		PassParameters.AQ_Params[i] = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
 	}
+
+    for (int32 i = 0; i < 8; ++i) {
+        BindCurveSlot(PassParameters, i, GetCurveParamSRV(RHICmdList,
+            i < ShaderData.CurveParams.Num() ? NodeId : FString(),
+            i < ShaderData.CurveParams.Num() ? ShaderData.CurveParams[i] : FString()));
+    }
 
 	// Resolved params: graph values merged with definition defaults (custom
 	// kinds resolve through their inline definitions inside Rust).

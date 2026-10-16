@@ -234,6 +234,11 @@ void FAqueductGraphExecutor::BuildCompiledGraph(FRHICommandListImmediate& RHICmd
 			D.bClearOutputs = NodePlan.bClearPassOutputs;
 			D.Sampler = TStaticSamplerState<SF_Bilinear>::GetRHI();
 
+            for (int32 i = 0; i < 8; ++i) {
+                D.CurveSRVs[i] = GetCurveParamSRV(RHICmdList,
+                    i < SD->CurveParams.Num() ? NodeId : FString(),
+                    i < SD->CurveParams.Num() ? SD->CurveParams[i] : FString());
+            }
 			// Resolve scratch decls from the effective NodeDef (registry for
 			// built-ins, materialized from the graph's [custom_nodes] table
 			// otherwise) — the SAME source DispatchDynamicNode uses, so the
@@ -725,6 +730,7 @@ void FAqueductGraphExecutor::ReplayCompiledGraph(FRHICommandListImmediate& RHICm
 		PassParameters.AQ_Input15 = D.InputSRVs[15];
 
 		PassParameters.AQ_Sampler = D.Sampler;
+        for (int32 i = 0; i < 8; ++i) BindCurveSlot(PassParameters, i, D.CurveSRVs[i]);
 
 		for (int32 i = 0; i < MAX_SCRATCH_SLOTS; i++)
 		{

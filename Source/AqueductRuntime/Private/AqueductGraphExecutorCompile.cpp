@@ -39,6 +39,17 @@ void FAqueductGraphExecutor::RemoveDeletedNodes(const TSet<FString>& ValidNodeId
 	for (const FString& NodeId : DeletedNodes)
 	{
 		NodeShaders.Remove(NodeId);
+		CurveParamBuffers.Remove(NodeId);
+	}
+
+	for (auto& Node : CurveParamBuffers)
+	{
+		if (Node.Key.IsEmpty()) continue; // Shared empty-buffer binding.
+		const FNodeShaderData* Shader = NodeShaders.Find(Node.Key);
+		for (auto It = Node.Value.CreateIterator(); It; ++It)
+		{
+			if (!Shader || !Shader->CurveParams.Contains(It.Key())) It.RemoveCurrent();
+		}
 	}
 
 	// Evict every texture owned by a deleted node: the plain output key,
@@ -215,7 +226,8 @@ bool FAqueductGraphExecutor::CompileShadersIncremental()
 		TArray<FString> OutputSemantics;
 		TArray<TPair<FString, FString>> Params;
 		TArray<FString> ScratchSemantics;
-		if (!ParseShaderResultJson(JsonStr, HLSLSource, InputSemantics, OutputSemantics, Params, ScratchSemantics))
+		TArray<FString> CurveParams;
+		if (!ParseShaderResultJson(JsonStr, HLSLSource, InputSemantics, OutputSemantics, Params, ScratchSemantics, CurveParams))
 		{
 			UE_LOG(LogAqueduct, Error, TEXT("Failed to parse shader result for node %s"), *NodeId);
 			return false;
@@ -243,6 +255,7 @@ bool FAqueductGraphExecutor::CompileShadersIncremental()
 		ShaderData.OutputSemantics = MoveTemp(OutputSemantics);
 		ShaderData.Params = MoveTemp(Params);
 		ShaderData.ScratchSemantics = MoveTemp(ScratchSemantics);
+		ShaderData.CurveParams = MoveTemp(CurveParams);
 		const FExecutionPlanNode& Plan = PlanNodes[NodeId];
 		ShaderData.Passes = Plan.Passes;
 		ShaderData.DefinitionHash = Plan.DefinitionHash;
@@ -299,7 +312,8 @@ bool FAqueductGraphExecutor::ParseShaderResultJson(
 	TArray<FString>& OutInputSemantics,
 	TArray<FString>& OutOutputSemantics,
 	TArray<TPair<FString, FString>>& OutParams,
-	TArray<FString>& OutScratchSemantics)
+	TArray<FString>& OutScratchSemantics,
+	TArray<FString>& OutCurveParams)
 {
 	TSharedPtr<FJsonObject> Root = ParseJsonObject(Json);
 	if (!Root.IsValid())
@@ -369,6 +383,13 @@ bool FAqueductGraphExecutor::ParseShaderResultJson(
 		}
 	}
 
+    const TArray<TSharedPtr<FJsonValue>>* Arrays;
+    if ((*BindingsObj)->TryGetArrayField(TEXT("curve_params"), Arrays)) {
+        for (const auto& Entry : *Arrays) {
+            const auto& Pair = Entry->AsArray();
+            if (ensure(Pair.Num() == 2)) OutCurveParams.Add(Pair[0]->AsString());
+        }
+    }
 	// Parse scratch: [["counter", 0], ["seeds", 1], ...]
 	// Sort by binding index; order determines which AQ_ScratchN slot each binds to.
 	const TArray<TSharedPtr<FJsonValue>>* ScratchArray;
@@ -419,6 +440,7 @@ FString FAqueductGraphExecutor::ExportPrecompiledMetadataJson() const
 		Node->SetArrayField(TEXT("inputs"), ToStringArray(Data.InputSemantics));
 		Node->SetArrayField(TEXT("outputs"), ToStringArray(Data.OutputSemantics));
 		Node->SetArrayField(TEXT("scratch"), ToStringArray(Data.ScratchSemantics));
+        Node->SetArrayField(TEXT("curve_params"), ToStringArray(Data.CurveParams));
 
 		TArray<TSharedPtr<FJsonValue>> ParamArray;
 		for (const auto& Param : Data.Params)
@@ -500,6 +522,7 @@ bool FAqueductGraphExecutor::LoadPrecompiledMetadata(const FString& MetadataJson
 		Data.InputSemantics = ToStrings(Node, TEXT("inputs"));
 		Data.OutputSemantics = ToStrings(Node, TEXT("outputs"));
 		Data.ScratchSemantics = ToStrings(Node, TEXT("scratch"));
+        Data.CurveParams = ToStrings(Node, TEXT("curve_params"));
 
 		const TArray<TSharedPtr<FJsonValue>>* ParamArray = nullptr;
 		if (Node->TryGetArrayField(TEXT("params"), ParamArray) && ParamArray)
@@ -596,7 +619,8 @@ bool FAqueductGraphExecutor::CompileAllShaders()
 		TArray<FString> OutputSemantics;
 		TArray<TPair<FString, FString>> Params;
 		TArray<FString> ScratchSemantics;
-		if (!ParseShaderResultJson(JsonStr, HLSLSource, InputSemantics, OutputSemantics, Params, ScratchSemantics))
+		TArray<FString> CurveParams;
+		if (!ParseShaderResultJson(JsonStr, HLSLSource, InputSemantics, OutputSemantics, Params, ScratchSemantics, CurveParams))
 		{
 			UE_LOG(LogAqueduct, Error, TEXT("Failed to parse shader result for node %s"), *NodeId);
 			return false;
@@ -625,6 +649,7 @@ bool FAqueductGraphExecutor::CompileAllShaders()
 		ShaderData.OutputSemantics = MoveTemp(OutputSemantics);
 		ShaderData.Params = MoveTemp(Params);
 		ShaderData.ScratchSemantics = MoveTemp(ScratchSemantics);
+		ShaderData.CurveParams = MoveTemp(CurveParams);
 		ShaderData.Passes = Plan.Passes;
 		ShaderData.DefinitionHash = Plan.DefinitionHash;
 		ShaderData.MipmappedInputs = Plan.MipmappedInputs;

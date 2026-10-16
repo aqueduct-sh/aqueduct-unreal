@@ -255,6 +255,13 @@ uint64 FAqueductGraphExecutor::ComputeCurrentVramBytes() const
 	{
 		Total += Pair.Value.SizeBytes;
 	}
+	for (const auto& Node : CurveParamBuffers)
+	{
+		for (const auto& Param : Node.Value)
+		{
+			if (Param.Value.Buffer.IsValid()) Total += Param.Value.Buffer->GetSize();
+		}
+	}
 	if (ScratchPlaceholderBuffer.IsValid())
 	{
 		Total += ScratchPlaceholderBuffer->GetSize();
@@ -322,6 +329,17 @@ FAqueductVramSnapshot FAqueductGraphExecutor::GetVramSnapshot() const
 		Add(TEXT("buffers"), FString(), Bytes);
 		Snapshot.BufferBytes += Bytes;
 		Snapshot.BufferCount++;
+	}
+	for (const auto& Node : CurveParamBuffers)
+	{
+		for (const auto& Param : Node.Value)
+		{
+			if (!Param.Value.Buffer.IsValid()) continue;
+			const uint64 Bytes = Param.Value.Buffer->GetSize();
+			Add(TEXT("buffers"), Node.Key, Bytes);
+			Snapshot.BufferBytes += Bytes;
+			Snapshot.BufferCount++;
+		}
 	}
 	if (ScratchPlaceholderBuffer.IsValid())
 	{

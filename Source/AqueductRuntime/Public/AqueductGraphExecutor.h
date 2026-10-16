@@ -109,6 +109,7 @@ struct FNodeShaderData
 	TArray<FString> InputSemantics;    // Input names in binding order
 	TArray<FString> OutputSemantics;   // Output names in binding order (e.g., ["output", "convex", "concave"])
 	TArray<TPair<FString, FString>> Params; // [(name, "int"|"float"), ...]
+	TArray<FString> CurveParams;
 	TArray<FString> ScratchSemantics;  // Scratch buffer names in binding order (AQ_Scratch0..)
 
 	// Multi-pass iteration count (from registry, default 1)
@@ -633,6 +634,14 @@ private:
 	/** Remove NodeShaders/NodeTextures entries for nodes not in ValidNodeIds. */
 	void RemoveDeletedNodes(const TSet<FString>& ValidNodeIds);
 
+    struct FCurveParamBuffer {
+        FBufferRHIRef Buffer;
+        FShaderResourceViewRHIRef SRV;
+        TArray<float> Values;
+    };
+    TMap<FString, TMap<FString, FCurveParamBuffer>> CurveParamBuffers;
+    FShaderResourceViewRHIRef GetCurveParamSRV(FRHICommandListImmediate& RHICmdList, const FString& NodeId, const FString& Name);
+
 	/** Parse shader compilation result JSON from FFI. */
 	static bool ParseShaderResultJson(
 		const FString& Json,
@@ -640,7 +649,8 @@ private:
 		TArray<FString>& OutInputSemantics,
 		TArray<FString>& OutOutputSemantics,
 		TArray<TPair<FString, FString>>& OutParams,
-		TArray<FString>& OutScratchSemantics
+		TArray<FString>& OutScratchSemantics,
+		TArray<FString>& OutCurveParams
 	);
 
 	/** Get the last FFI error as an FString, or empty if none. */

@@ -61,6 +61,7 @@ struct FCompiledDispatch
 
 	// Bind state (pre-resolved, reused every frame)
 	FShaderResourceViewRHIRef InputSRVs[16];
+	FShaderResourceViewRHIRef CurveSRVs[8];
 	FUnorderedAccessViewRHIRef OutputUAVs[4];
 	FUnorderedAccessViewRHIRef ScratchUAVs[8];
 	// Count-sized UAVs over the SHARED scratch slots, zero-filled at the

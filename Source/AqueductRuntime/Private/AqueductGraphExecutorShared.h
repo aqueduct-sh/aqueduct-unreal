@@ -35,6 +35,21 @@ inline EPixelFormat AqueductFormatToPixelFormat(const FString& Format)
 	return PF_FloatRGBA;
 }
 
+inline void BindCurveSlot(FAqueductDynamicCS::FParameters& Params, int32 Slot, const FShaderResourceViewRHIRef& SRV)
+{
+    switch (Slot) {
+    case 0: Params.AQ_Curve0 = SRV; break;
+    case 1: Params.AQ_Curve1 = SRV; break;
+    case 2: Params.AQ_Curve2 = SRV; break;
+    case 3: Params.AQ_Curve3 = SRV; break;
+    case 4: Params.AQ_Curve4 = SRV; break;
+    case 5: Params.AQ_Curve5 = SRV; break;
+    case 6: Params.AQ_Curve6 = SRV; break;
+    case 7: Params.AQ_Curve7 = SRV; break;
+    default: ensure(false); break;
+    }
+}
+
 inline void BindScratchSlot(FAqueductDynamicCS::FParameters& Params, int32 Slot, FUnorderedAccessViewRHIRef UAV)
 {
 	switch (Slot)

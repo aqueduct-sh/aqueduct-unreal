@@ -682,6 +682,7 @@ bool FAqueductGraphExecutor::SetNodeParam(const FString& NodeId, const FString& 
 
 void FAqueductGraphExecutor::ReleaseGraphResources()
 {
+    CurveParamBuffers.Reset();
 	check(IsInGameThread());
 
 	NodeTextures.Empty();

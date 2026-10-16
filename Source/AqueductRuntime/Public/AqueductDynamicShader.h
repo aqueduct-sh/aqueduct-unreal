@@ -130,6 +130,15 @@ public:
 		SHADER_PARAMETER_SAMPLER(SamplerState, AQ_Sampler)
 		// Scalar parameters packed as float4 array (std140, 64 floats max)
 		SHADER_PARAMETER_ARRAY(FVector4f, AQ_Params, [16])
+		SHADER_PARAMETER_SRV(StructuredBuffer<float>, AQ_Curve0)
+		SHADER_PARAMETER_SRV(StructuredBuffer<float>, AQ_Curve1)
+		SHADER_PARAMETER_SRV(StructuredBuffer<float>, AQ_Curve2)
+		SHADER_PARAMETER_SRV(StructuredBuffer<float>, AQ_Curve3)
+		SHADER_PARAMETER_SRV(StructuredBuffer<float>, AQ_Curve4)
+		SHADER_PARAMETER_SRV(StructuredBuffer<float>, AQ_Curve5)
+		SHADER_PARAMETER_SRV(StructuredBuffer<float>, AQ_Curve6)
+		SHADER_PARAMETER_SRV(StructuredBuffer<float>, AQ_Curve7)
+
 		// GPU-internal scratch storage buffers. Each slot has typed aliases so
 		// Slang-generated RWStructuredBuffer<float4>/uint4/etc. declarations can
 		// compile without forcing every node through uint scratch.
