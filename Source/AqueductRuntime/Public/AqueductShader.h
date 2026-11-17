@@ -123,6 +123,28 @@ public:
 	}
 };
 
+class AQUEDUCTRUNTIME_API FAqueductPackAnisotropyCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FAqueductPackAnisotropyCS);
+	SHADER_USE_PARAMETER_STRUCT(FAqueductPackAnisotropyCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_SRV(Texture2D<float4>, InputA)
+		SHADER_PARAMETER_SRV(Texture2D<float4>, InputB)
+		SHADER_PARAMETER(uint32, PresenceMask)
+		SHADER_PARAMETER(uint32, bReplicateR)
+		SHADER_PARAMETER(float, DefaultAnisotropy)
+		SHADER_PARAMETER(FVector2f, DefaultTangentDir)
+		SHADER_PARAMETER_UAV(RWTexture2D<float4>, OutPacked)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
 class AQUEDUCTRUNTIME_API FAqueductPackNormalCS : public FGlobalShader
 {
 public:

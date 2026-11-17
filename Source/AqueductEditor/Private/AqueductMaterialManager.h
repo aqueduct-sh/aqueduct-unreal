@@ -181,9 +181,22 @@ private:
 	/** Asset URLs with an in-flight HTTP request. */
 	TSet<FString> InFlightAssetDownloads;
 
+	/** Aqueduct-owned parent materials. A graph gets the simplest parent that
+	 *  shades everything it binds, so graphs without fuzz or anisotropy keep the
+	 *  plain parents and pay for neither feature. */
+	enum class EAqueductParentKind : uint8
+	{
+		Base,              // Default Lit, opaque
+		Anisotropic,       // Default Lit, opaque, anisotropy and tangent wired
+		Cloth,             // Cloth, opaque, fuzz wired
+		Translucent,       // Default Lit, translucent
+		TranslucentCloth,  // Cloth, translucent, fuzz wired
+		Count,
+	};
+
 	struct FGraphState;  // defined below; referenced by the helpers above the definition
 
-	UMaterial* GetOrCreateBaseMaterial(bool bTranslucent = false);
+	UMaterial* GetOrCreateBaseMaterial(EAqueductParentKind ParentKind = EAqueductParentKind::Base);
 
 	/** Get the executor for a graph, creating + compiling one if needed. */
 	TSharedPtr<UE::Aqueduct::FAqueductGraphExecutor> GetOrCreateExecutor(
@@ -276,6 +289,7 @@ private:
 		FString GraphToml;
 		FString CurrentHash;
 		TMap<FString, FString> OutputContentHashes;
+		AqueductTextureWriter::FAnisotropyConstants CachedAnisoConstants;
 
 		/** Wrapper asset (cached for the deferred save). */
 		TObjectPtr<UAqueductGraph> GraphAsset;
@@ -313,8 +327,7 @@ private:
 	};
 
 	TMap<FString, FGraphState> GraphStates;
-	UMaterial* BaseMaterial = nullptr;
-	UMaterial* TranslucentMaterial = nullptr;
+	UMaterial* ParentMaterials[static_cast<int32>(EAqueductParentKind::Count)] = {};
 	FTSTicker::FDelegateHandle TickerHandle;
 	bool bInitialized = false;
 

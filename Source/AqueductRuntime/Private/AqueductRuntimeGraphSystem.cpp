@@ -26,6 +26,12 @@ void FAqueductRuntimeGraphSystem::Initialize()
 
 	IAssetRegistry& AssetRegistry =
 		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+#if WITH_EDITOR
+	if (!FPlatformProperties::RequiresCookedData())
+	{
+		AssetRegistry.ScanPathsSynchronous({TEXT("/Game")}, false);
+	}
+#endif
 	AssetRegistry.WaitForCompletion();
 
 	TArray<FAssetData> GraphAssets;
@@ -53,6 +59,8 @@ void FAqueductRuntimeGraphSystem::Initialize()
 				TEXT("%s: graph parse failed at runtime"), *Runtime->GraphName);
 			continue;
 		}
+		Runtime->AnisoConstants = AqueductTextureWriter::ResolveAnisotropyConstantsFromBindingsJson(
+			Runtime->Executor->GetOutputBindingsJson());
 
 		bool bReady = false;
 		if (!GraphAsset->CookedMetadataJson.IsEmpty())
@@ -229,6 +237,8 @@ void FAqueductRuntimeGraphSystem::ExecuteGraphAtTime(FRuntimeGraph& Graph, float
 		// ApplyDeliverySettings): the cooked asset's format encodes its kind.
 		const EAqueductMapKind Kind = (TexPair.Key == OrmDeliveryName())
 			? EAqueductMapKind::Orm
+			: (TexPair.Key == AnisotropyDeliveryName())
+			? EAqueductMapKind::Anisotropy
 			: Tex->CompressionSettings == TC_Normalmap ? EAqueductMapKind::Normal
 			: Tex->CompressionSettings == TC_Grayscale ? EAqueductMapKind::Gray
 			: EAqueductMapKind::Color;
@@ -248,6 +258,8 @@ void FAqueductRuntimeGraphSystem::ExecuteGraphAtTime(FRuntimeGraph& Graph, float
 		FDeliveryTarget T;
 		T.Name = TexPair.Key;
 		T.Kind = Kind;
+		T.AnisotropyDefault = Graph.AnisoConstants.Anisotropy;
+		T.TangentDefault = Graph.AnisoConstants.TangentDir;
 		T.bFlipNormalGreen =
 			(Kind == EAqueductMapKind::Normal && Graph.Executor->GetNormalFormat() == 0) ? 1 : 0;
 		// RHI refs pinned on the game thread — see FDeliveryTarget. The
@@ -288,6 +300,13 @@ void FAqueductRuntimeGraphSystem::ExecuteGraphAtTime(FRuntimeGraph& Graph, float
 					bAny |= T.OrmSrc[c].IsValid();
 				}
 				if (!bAny) Targets.RemoveAtSwap(i);
+			}
+			else if (T.Kind == EAqueductMapKind::Anisotropy)
+			{
+				const TCHAR* const* Components = AnisotropyComponentOutputs();
+				T.AnisoSrc[0] = Outputs.FindRef(Components[0]);
+				T.AnisoSrc[1] = Outputs.FindRef(Components[1]);
+				if (!T.AnisoSrc[0].IsValid() && !T.AnisoSrc[1].IsValid()) Targets.RemoveAtSwap(i);
 			}
 			else
 			{

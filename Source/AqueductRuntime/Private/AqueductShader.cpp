@@ -7,6 +7,7 @@ IMPLEMENT_GLOBAL_SHADER(FAqueductMipGenCS, "/Plugin/Aqueduct/Private/AqueductMip
 IMPLEMENT_GLOBAL_SHADER(FAqueductMipGenR32CS, "/Plugin/Aqueduct/Private/AqueductMipGen.usf", "MipGenR32CS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FAqueductPackColorCS, "/Plugin/Aqueduct/Private/AqueductDeliver.usf", "PackColorCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FAqueductPackOrmCS, "/Plugin/Aqueduct/Private/AqueductDeliver.usf", "PackOrmCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FAqueductPackAnisotropyCS, "/Plugin/Aqueduct/Private/AqueductDeliver.usf", "PackAnisotropyCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FAqueductPackNormalCS, "/Plugin/Aqueduct/Private/AqueductDeliver.usf", "PackNormalCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FAqueductPackGrayCS, "/Plugin/Aqueduct/Private/AqueductDeliver.usf", "PackGrayCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FAqueductDownsampleCS, "/Plugin/Aqueduct/Private/AqueductDeliver.usf", "DownsampleCS", SF_Compute);

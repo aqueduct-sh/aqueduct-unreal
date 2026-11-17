@@ -23,15 +23,17 @@
 
 #include "/Engine/Public/Platform.ush"
 
-Texture2D<float4> InputA;   // primary output (or AO for ORM)
-Texture2D<float4> InputB;   // roughness (ORM only)
+Texture2D<float4> InputA;   // primary output (or AO for ORM, or anisotropy)
+Texture2D<float4> InputB;   // roughness (ORM) or tangent (Anisotropy)
 Texture2D<float4> InputC;   // metallic  (ORM only)
-uint PresenceMask;          // ORM: bit0=AO, bit1=roughness, bit2=metallic
+uint PresenceMask;          // ORM: bit0=AO, bit1=roughness, bit2=metallic; Aniso: bit0=anisotropy, bit1=tangent
 uint bReplicateR;           // core expansion-swizzle contract: single-channel
                             // sources present as (r,r,r,1), never (r,0,0,1)
 uint bFlipGreen;            // normals only: graph declares OpenGL (Y-up) but UE
                             // materials sample DirectX (Y-down), so delivery
                             // inverts G. DirectX graphs pass through.
+float DefaultAnisotropy;    // fallback scalar anisotropy when InputA is absent
+float2 DefaultTangentDir;   // fallback unit 2D tangent (tx, ty) when InputB is absent
 
 Texture2D<float4> SrcMip;   // downsample/encode source (single-mip SRV)
 Texture2D<float>  SrcMipGray;
@@ -87,6 +89,34 @@ void PackOrmCS(uint3 DTid : SV_DispatchThreadID)
     float Rough = (PresenceMask & 2u) ? InputB.Load(int3(DTid.xy, 0)).r : 0.5;
     float Metal = (PresenceMask & 4u) ? InputC.Load(int3(DTid.xy, 0)).r : 0.0;
     OutPacked[DTid.xy] = QuantizeCore4(float4(AO, Rough, Metal, 1.0), 255.0);
+}
+
+[numthreads(16, 16, 1)]
+void PackAnisotropyCS(uint3 DTid : SV_DispatchThreadID)
+{
+    uint2 Dims = PackedDims();
+    if (DTid.x >= Dims.x || DTid.y >= Dims.y) return;
+
+    float A = (PresenceMask & 1u)
+        ? saturate(InputA.Load(int3(DTid.xy, 0)).r)
+        : saturate(DefaultAnisotropy);
+
+    float2 Dir = DefaultTangentDir;
+    if (PresenceMask & 2u)
+    {
+        float4 TVal = InputB.Load(int3(DTid.xy, 0));
+        if (bReplicateR != 0) TVal = float4(TVal.r, TVal.r, TVal.r, 1.0);
+        float2 Raw = TVal.rg * 2.0f - 1.0f;
+        float Len = length(Raw);
+        Dir = (Len > 1e-5f) ? (Raw / Len) : float2(1.0f, 0.0f);
+    }
+
+    float2 Uw = A * float2(Dir.x * Dir.x - Dir.y * Dir.y, 2.0f * Dir.x * Dir.y);
+    // Center the signed vector on code 128 so zero anisotropy is stored
+    // exactly: 8 bits cannot represent 0.5, and a texel that decodes to a
+    // small nonzero vector would carry a spurious direction.
+    float2 Enc = (128.0f + 127.0f * Uw) / 255.0f;
+    OutPacked[DTid.xy] = QuantizeCore4(float4(Enc.x, Enc.y, 0.0f, 1.0f), 255.0);
 }
 
 // Normals: 16-bit/channel so the only 8-bit quantization is the BC5

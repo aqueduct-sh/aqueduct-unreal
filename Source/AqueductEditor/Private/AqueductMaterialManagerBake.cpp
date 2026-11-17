@@ -209,6 +209,8 @@ bool FAqueductMaterialManager::BakeGraph(const FString& GraphFilePath, bool bAll
 	EnsureOutputTextureAssets(FullPath, Executor.Get(), MIC);
 	State = GraphStates.Find(FullPath);
 	if (!State) return false;
+	State->CachedAnisoConstants = AqueductTextureWriter::ResolveAnisotropyConstantsFromBindingsJson(
+		Executor->GetOutputBindingsJson());
 	CopyOutputsToTextures(FullPath, Executor.Get());
 
 	// Batched readback of the STALE deliveries only (blocking: this path

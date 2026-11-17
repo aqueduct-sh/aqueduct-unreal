@@ -1,4 +1,7 @@
 #include "AqueductTextureWriter.h"
+#include "Dom/JsonObject.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "AqueductShader.h"
 #include "AqueductLiveTextureResource.h"
 #include "Engine/Texture2D.h"
@@ -39,14 +42,96 @@ const TCHAR* OrmDeliveryName()
 	return TEXT("orm");
 }
 
+static const TCHAR* GAnisoComponents[2] = { TEXT("anisotropy"), TEXT("tangent") };
+
+const TCHAR* const* AnisotropyComponentOutputs()
+{
+	return GAnisoComponents;
+}
+
+bool IsAnisotropyComponentOutput(const FString& OutputName)
+{
+	return OutputName == GAnisoComponents[0] || OutputName == GAnisoComponents[1];
+}
+
+const TCHAR* AnisotropyDeliveryName()
+{
+	return TEXT("anisotropy");
+}
+
+FAnisotropyConstants ResolveAnisotropyConstantsFromBindingsJson(const FString& BindingsJson)
+{
+	FAnisotropyConstants Result;
+	TSharedPtr<FJsonObject> Outputs;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(BindingsJson);
+	if (!FJsonSerializer::Deserialize(Reader, Outputs) || !Outputs)
+	{
+		return Result;
+	}
+	if (const TSharedPtr<FJsonValue>* AVal = Outputs->Values.Find(TEXT("anisotropy")))
+	{
+		if (AVal->IsValid())
+		{
+			float Scalar = 0.0f;
+			if ((*AVal)->Type == EJson::Number)
+			{
+				Scalar = (float)(*AVal)->AsNumber();
+			}
+			else if ((*AVal)->Type == EJson::Array && (*AVal)->AsArray().Num() > 0)
+			{
+				Scalar = (float)(*AVal)->AsArray()[0]->AsNumber();
+			}
+			if (FMath::IsFinite(Scalar))
+			{
+				Result.Anisotropy = FMath::Clamp(Scalar, 0.0f, 1.0f);
+			}
+		}
+	}
+	if (const TSharedPtr<FJsonValue>* TVal = Outputs->Values.Find(TEXT("tangent")))
+	{
+		if (TVal->IsValid())
+		{
+			float R = 1.0f;
+			float G = 0.5f;
+			bool bNumeric = false;
+			if ((*TVal)->Type == EJson::Number)
+			{
+				R = (float)(*TVal)->AsNumber();
+				G = R;
+				bNumeric = true;
+			}
+			else if ((*TVal)->Type == EJson::Array && (*TVal)->AsArray().Num() >= 2)
+			{
+				const auto& Arr = (*TVal)->AsArray();
+				R = (float)Arr[0]->AsNumber();
+				G = (float)Arr[1]->AsNumber();
+				bNumeric = true;
+			}
+			if (bNumeric)
+			{
+				const FVector2f Raw(R * 2.0f - 1.0f, G * 2.0f - 1.0f);
+				const float Len = Raw.Size();
+				if (FMath::IsFinite(Len) && Len > 1e-5f)
+				{
+					Result.TangentDir = Raw / Len;
+				}
+			}
+		}
+	}
+	return Result;
+}
+
 EAqueductMapKind ClassifyOutput(const FString& OutputName, EPixelFormat SrcPF)
 {
 	if (OutputName == TEXT("base_color")) return EAqueductMapKind::Color;
 	if (OutputName == TEXT("albedo")) return EAqueductMapKind::Color; // legacy name for base_color
 	if (OutputName == TEXT("emissive")) return EAqueductMapKind::Color;
+	if (OutputName == TEXT("fuzz_color")) return EAqueductMapKind::Color;
 	if (OutputName == TEXT("normal")) return EAqueductMapKind::Normal;
-	if (OutputName == TEXT("height") || OutputName == TEXT("opacity")) return EAqueductMapKind::Gray;
+	if (OutputName == TEXT("height") || OutputName == TEXT("opacity") || OutputName == TEXT("fuzz_weight"))
+		return EAqueductMapKind::Gray;
 	if (OutputName == OrmDeliveryName()) return EAqueductMapKind::Orm;
+	if (OutputName == AnisotropyDeliveryName()) return EAqueductMapKind::Anisotropy;
 	// Generic outputs: single-channel data is grayscale by core contract.
 	return SrcPF == PF_R32_FLOAT ? EAqueductMapKind::Gray : EAqueductMapKind::Color;
 }
@@ -57,7 +142,7 @@ EPixelFormat PackedPixelFormat(EAqueductMapKind Kind)
 	{
 	case EAqueductMapKind::Normal: return PF_A16B16G16R16;
 	case EAqueductMapKind::Gray:   return PF_G8;
-	default:                       return PF_R8G8B8A8;  // Color, Orm
+	default:                       return PF_R8G8B8A8;  // Color, Orm, Anisotropy
 	}
 }
 
@@ -148,6 +233,10 @@ static FTextureRHIRef RunDeliveryChainRT(
 	if (Target.Kind == EAqueductMapKind::Orm)
 	{
 		for (int32 i = 0; i < 3 && !Primary.IsValid(); ++i) Primary = Target.OrmSrc[i];
+	}
+	else if (Target.Kind == EAqueductMapKind::Anisotropy)
+	{
+		Primary = Target.AnisoSrc[0].IsValid() ? Target.AnisoSrc[0] : Target.AnisoSrc[1];
 	}
 	if (!Primary.IsValid()) return nullptr;
 	const uint32 Size = Primary->GetSizeX();
@@ -262,6 +351,40 @@ static FTextureRHIRef RunDeliveryChainRT(
 		P.InputB = Views[1];
 		P.InputC = Views[2];
 		P.PresenceMask = Mask;
+		P.OutPacked = MakeMipUAV(RHICmdList, Scratch.Packed, 0);
+		FComputeShaderUtils::Dispatch(RHICmdList, Shader, P, FIntVector(PackGroups, PackGroups, 1));
+		break;
+	}
+	case EAqueductMapKind::Anisotropy:
+	{
+		TShaderMapRef<FAqueductPackAnisotropyCS> Shader(ShaderMap);
+		if (!ensure(Shader.IsValid())) return nullptr;
+		FAqueductPackAnisotropyCS::FParameters P;
+		uint32 Mask = 0;
+		FShaderResourceViewRHIRef Fallback = SrcSRV(Primary);
+		if (Target.AnisoSrc[0].IsValid())
+		{
+			Mask |= 1u;
+			P.InputA = (Target.AnisoSrc[0] == Primary) ? Fallback : SrcSRV(Target.AnisoSrc[0]);
+		}
+		else
+		{
+			P.InputA = Fallback;
+		}
+		if (Target.AnisoSrc[1].IsValid())
+		{
+			Mask |= 2u;
+			P.InputB = (Target.AnisoSrc[1] == Primary) ? Fallback : SrcSRV(Target.AnisoSrc[1]);
+			P.bReplicateR = ShouldReplicateR(Target.AnisoSrc[1]->GetFormat()) ? 1 : 0;
+		}
+		else
+		{
+			P.InputB = Fallback;
+			P.bReplicateR = 0;
+		}
+		P.PresenceMask = Mask;
+		P.DefaultAnisotropy = Target.AnisotropyDefault;
+		P.DefaultTangentDir = Target.TangentDefault;
 		P.OutPacked = MakeMipUAV(RHICmdList, Scratch.Packed, 0);
 		FComputeShaderUtils::Dispatch(RHICmdList, Shader, P, FIntVector(PackGroups, PackGroups, 1));
 		break;

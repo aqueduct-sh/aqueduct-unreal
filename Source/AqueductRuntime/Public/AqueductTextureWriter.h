@@ -43,10 +43,11 @@ namespace AqueductTextureWriter
 	/** Delivery format class of one texture asset. */
 	enum class EAqueductMapKind : uint8
 	{
-		Color,   // baked BC7 + sRGB (base_color, generic color outputs)
-		Orm,     // baked BC7 linear, R=AO G=Roughness B=Metallic
-		Normal,  // baked BC5 (X/Y; sampler reconstructs Z)
-		Gray,    // baked BC4 linear (height, generic single-channel outputs)
+		Color,      // baked BC7 + sRGB (base_color, fuzz_color, generic color outputs)
+		Orm,        // baked BC7 linear, R=AO G=Roughness B=Metallic
+		Anisotropy, // baked BC7 linear, RG = 0.5 + 0.5 * a * (cos 2theta, sin 2theta), B=0, A=1
+		Normal,     // baked BC5 (X/Y; sampler reconstructs Z)
+		Gray,       // baked BC4 linear (height, opacity, fuzz_weight, generic single-channel outputs)
 	};
 
 	/** Output names packed into the ORM texture, in channel order R,G,B. */
@@ -55,6 +56,23 @@ namespace AqueductTextureWriter
 
 	/** Name of the packed ORM delivery texture ("orm"). */
 	AQUEDUCTRUNTIME_API const TCHAR* OrmDeliveryName();
+
+	/** Output names packed into the Anisotropy texture: {"anisotropy","tangent"}. */
+	AQUEDUCTRUNTIME_API const TCHAR* const* AnisotropyComponentOutputs();
+	AQUEDUCTRUNTIME_API bool IsAnisotropyComponentOutput(const FString& OutputName);
+
+	/** Name of the packed Anisotropy delivery texture ("anisotropy"). */
+	AQUEDUCTRUNTIME_API const TCHAR* AnisotropyDeliveryName();
+
+	/** Resolved graph-level fallback constants when only one of [anisotropy, tangent] is texture-bound. */
+	struct FAnisotropyConstants
+	{
+		float Anisotropy = 0.0f;
+		FVector2f TangentDir = FVector2f(1.0f, 0.0f);
+	};
+
+	AQUEDUCTRUNTIME_API FAnisotropyConstants ResolveAnisotropyConstantsFromBindingsJson(
+		const FString& BindingsJson);
 
 	/** Classify a non-ORM output by name (base_color/normal/height), falling
 	 *  back to the source pixel format for generic outputs (single-channel
@@ -81,6 +99,9 @@ namespace AqueductTextureWriter
 		EAqueductMapKind Kind = EAqueductMapKind::Color;
 		FTextureRHIRef Src;                        // single-source kinds
 		FTextureRHIRef OrmSrc[3];                  // ao, roughness, metallic (any may be null)
+		FTextureRHIRef AnisoSrc[2];                // anisotropy, tangent (either may be null)
+		float AnisotropyDefault = 0.0f;            // constant fallback when AnisoSrc[0] is null
+		FVector2f TangentDefault = FVector2f(1.0f, 0.0f); // unit (tx, ty) fallback when AnisoSrc[1] is null
 		// Normal kind only: the graph declares an OpenGL (Y-up) normal format
 		// but UE materials sample DirectX (Y-down), so the pack stage inverts
 		// the green channel. Set from the graph's normal_format at enqueue.

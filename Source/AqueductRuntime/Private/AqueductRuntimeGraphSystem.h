@@ -40,6 +40,7 @@ public:
 	{
 		FString GraphName;
 		TSharedPtr<UE::Aqueduct::FAqueductGraphExecutor> Executor;
+		AqueductTextureWriter::FAnisotropyConstants AnisoConstants;
 		TMap<FString, TObjectPtr<UTexture2D>> OutputTextures;
 		TMap<FString, AqueductTextureWriter::FDeliveryScratch> DeliveryScratch; // render-thread owned
 		/** Delivery name → the FAqueductLiveTextureResource installed on the

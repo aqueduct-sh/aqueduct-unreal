@@ -31,6 +31,7 @@
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialExpressionTextureCoordinate.h"
+#include "Materials/MaterialExpressionCustom.h"
 #include "MaterialDomain.h"
 #include "Engine/Texture2D.h"
 #include "TextureResource.h"
@@ -60,8 +61,44 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogAqueductMaterial, Log, All);
 
-static const TCHAR* GBaseMaterialPath = TEXT("/Game/Aqueduct/M_Aqueduct_Base");
-static const TCHAR* GTranslucentMaterialPath = TEXT("/Game/Aqueduct/M_Aqueduct_Translucent");
+/** One Aqueduct-owned parent material. Indexed by EAqueductParentKind. Fuzz
+ *  and anisotropy are wired only on the parents that shade them: Unreal draws
+ *  every Default Lit material with a connected Anisotropy input in an extra
+ *  mesh pass.
+ *
+ *  Unreal's Cloth shading model evaluates fuzz but no anisotropy, and Default
+ *  Lit evaluates anisotropy but no fuzz; no legacy shading model evaluates
+ *  both at one pixel. A graph that binds fuzz_weight therefore shades as
+ *  Cloth, and its anisotropy is not shown in Unreal.
+ *
+ *  Parent selection is structural: it depends on which outputs a graph binds,
+ *  never on their values, so no value change can switch parents. */
+struct FAqueductParentDef
+{
+	const TCHAR* PackagePath;
+	const TCHAR* AssetName;
+	EMaterialShadingModel ShadingModel;
+	bool bTranslucent;
+	bool bFuzz;
+	bool bAnisotropy;
+};
+
+static const FAqueductParentDef GParentDefs[] = {
+	{TEXT("/Game/Aqueduct/M_Aqueduct_Base"), TEXT("M_Aqueduct_Base"), MSM_DefaultLit, false, false, false},
+	{TEXT("/Game/Aqueduct/M_Aqueduct_Anisotropic"), TEXT("M_Aqueduct_Anisotropic"), MSM_DefaultLit, false, false, true},
+	{TEXT("/Game/Aqueduct/M_Aqueduct_Cloth"), TEXT("M_Aqueduct_Cloth"), MSM_Cloth, false, true, false},
+	{TEXT("/Game/Aqueduct/M_Aqueduct_Translucent"), TEXT("M_Aqueduct_Translucent"), MSM_DefaultLit, true, false, false},
+	{TEXT("/Game/Aqueduct/M_Aqueduct_TranslucentCloth"), TEXT("M_Aqueduct_TranslucentCloth"), MSM_Cloth, true, true, false},
+};
+
+static bool IsAqueductOwnedParentPackage(const FString& PackageName)
+{
+	for (const FAqueductParentDef& Def : GParentDefs)
+	{
+		if (PackageName == Def.PackagePath) return true;
+	}
+	return false;
+}
 
 // Non-realtime editor viewports (material/MI editor previews are realtime
 // only while the lighting rig rotates) repaint solely on invalidation. Live
@@ -93,13 +130,16 @@ struct FDeliveryParamDef
 };
 
 static const FDeliveryParamDef GDeliveryParamMap[] = {
-	{TEXT("base_color"), FName("BaseColor")},
-	{TEXT("albedo"),     FName("BaseColor")}, // legacy name; superseded when base_color exists
-	{TEXT("normal"),     FName("Normal")},
-	{TEXT("orm"),        FName("ORM")},
-	{TEXT("height"),     FName("Height")},
-	{TEXT("emissive"),   FName("Emissive")},
-	{TEXT("opacity"),    FName("Opacity")},
+	{TEXT("base_color"),  FName("BaseColor")},
+	{TEXT("albedo"),      FName("BaseColor")}, // legacy name; superseded when base_color exists
+	{TEXT("normal"),      FName("Normal")},
+	{TEXT("orm"),         FName("ORM")},
+	{TEXT("height"),      FName("Height")},
+	{TEXT("emissive"),    FName("Emissive")},
+	{TEXT("opacity"),     FName("Opacity")},
+	{TEXT("fuzz_color"),  FName("FuzzColor")},
+	{TEXT("fuzz_weight"), FName("FuzzWeight")},
+	{TEXT("anisotropy"),  FName("Anisotropy")},
 };
 
 static const FName* FindParamNameForDelivery(const FString& DeliveryName)
@@ -200,12 +240,11 @@ static FResolvedOutputBinding ResolveVectorBinding(
 
 static FString DeliveryHashFor(const FString& DeliveryName, const TMap<FString, FString>& OutputHashes)
 {
-	if (DeliveryName == AqueductTextureWriter::OrmDeliveryName())
+	auto Combine = [&OutputHashes](const TCHAR* const* Components, int32 Count) -> FString
 	{
-		const TCHAR* const* Components = AqueductTextureWriter::OrmComponentOutputs();
 		FString Combined;
 		bool bAny = false;
-		for (int32 i = 0; i < 3; ++i)
+		for (int32 i = 0; i < Count; ++i)
 		{
 			if (i > 0) Combined += TEXT("|");
 			if (const FString* H = OutputHashes.Find(Components[i]))
@@ -219,6 +258,14 @@ static FString DeliveryHashFor(const FString& DeliveryName, const TMap<FString, 
 			}
 		}
 		return bAny ? Combined : FString();
+	};
+	if (DeliveryName == AqueductTextureWriter::OrmDeliveryName())
+	{
+		return Combine(AqueductTextureWriter::OrmComponentOutputs(), 3);
+	}
+	if (DeliveryName == AqueductTextureWriter::AnisotropyDeliveryName())
+	{
+		return Combine(AqueductTextureWriter::AnisotropyComponentOutputs(), 2);
 	}
 	return OutputHashes.FindRef(DeliveryName);
 }
@@ -785,17 +832,47 @@ bool FAqueductMaterialManager::ReloadGraphFromFile(const FString& GraphFilePath)
 	}
 	// Only switch Aqueduct-owned parents. A user-authored parent is authoritative.
 	const FString ParentPackage = MIC->Parent ? MIC->Parent->GetOutermost()->GetName() : FString();
-	if (ParentPackage == GBaseMaterialPath || ParentPackage == GTranslucentMaterialPath)
+	if (IsAqueductOwnedParentPackage(ParentPackage))
 	{
 		const FResolvedOutputBinding Opacity = ResolveScalarBinding(OutputBindings, {TEXT("opacity")}, 1.0f);
-		const bool bTranslucent = Opacity.bTexture || (FMath::IsFinite(Opacity.Scalar) && Opacity.Scalar < 1.0f);
-		UMaterial* DesiredParent = GetOrCreateBaseMaterial(bTranslucent);
+		const FResolvedOutputBinding FuzzWeight = ResolveScalarBinding(OutputBindings, {TEXT("fuzz_weight")}, 0.0f);
+		const FResolvedOutputBinding Aniso = ResolveScalarBinding(OutputBindings, {TEXT("anisotropy")}, 0.0f);
+		// Structural selection: a bound output selects its parent whatever its
+		// value, so an arbitrarily small value change never switches parents.
+		// fuzz_color and tangent alone change nothing, matching the graph
+		// diagnostics.
+		const bool bOpacity = Opacity.bExplicit;
+		const EAqueductParentKind DesiredKind = bOpacity
+			? (FuzzWeight.bExplicit ? EAqueductParentKind::TranslucentCloth : EAqueductParentKind::Translucent)
+			: FuzzWeight.bExplicit
+			? EAqueductParentKind::Cloth
+			: Aniso.bExplicit
+			? EAqueductParentKind::Anisotropic
+			: EAqueductParentKind::Base;
+		if (Aniso.bExplicit && DesiredKind != EAqueductParentKind::Anisotropic)
+		{
+			// Measured in UE 5.7: neither Cloth shading nor translucent surface
+			// shading turns its highlight with the tangent.
+			UE_LOG(LogAqueductMaterial, Log,
+				TEXT("Aqueduct graph %s binds anisotropy together with %s. Unreal shades anisotropy only on opaque Default Lit materials, so this material renders isotropic in Unreal."),
+				*FullPath, FuzzWeight.bExplicit ? TEXT("fuzz_weight") : TEXT("opacity"));
+		}
+		UMaterial* DesiredParent = GetOrCreateBaseMaterial(DesiredKind);
 		if (ensure(DesiredParent) && MIC->Parent != DesiredParent)
 		{
 			MIC->SetParentEditorOnly(DesiredParent);
+			// Rebuild the instance's render state against the new parent, as
+			// instance creation does. Without it the instance can keep
+			// rendering through the previous parent's shaders.
+			MIC->PostEditChange();
 		}
 	}
 	ApplyOutputBindingsToMIC(OutputBindings, Executor->GetNormalFormat(), MIC);
+	if (FGraphState* State = GraphStates.Find(FullPath))
+	{
+		State->CachedAnisoConstants = AqueductTextureWriter::ResolveAnisotropyConstantsFromBindingsJson(
+			Executor->GetOutputBindingsJson());
+	}
 
 	Executor->EvaluateTimeExpressions();
 	const double TParse1 = FPlatformTime::Seconds();
@@ -1128,8 +1205,13 @@ static UTexture2D* GetOrCreateDefaultTexture(
 		break;
 	}
 	case EAqueductMapKind::Gray:
-		Pixels.Init(FCString::Strcmp(Suffix, TEXT("Opacity")) == 0 ? 255 : 128, Size * Size);
+	{
+		const uint8 Fill = FCString::Strcmp(Suffix, TEXT("Opacity")) == 0 ? 255
+			: FCString::Strcmp(Suffix, TEXT("FuzzWeight")) == 0 ? 0
+			: 128;
+		Pixels.Init(Fill, Size * Size);
 		break;
+	}
 	case EAqueductMapKind::Orm:
 	{
 		// BGRA bytes: B=Metallic 0, G=Roughness 0.5, R=AO 1.
@@ -1141,9 +1223,22 @@ static UTexture2D* GetOrCreateDefaultTexture(
 		}
 		break;
 	}
-	default:  // Color: mid-gray sRGB
+	case EAqueductMapKind::Anisotropy:
 	{
-		const uint8 Texel[4] = { 128, 128, 128, 255 };
+		// BGRA bytes: B=0, G=128 (w=0), R=128 (u=0), A=255 -> exactly isotropic;
+		// the packed vector is centered on code 128.
+		const uint8 Texel[4] = { 0, 128, 128, 255 };
+		Pixels.SetNumUninitialized(Size * Size * 4);
+		for (int32 i = 0; i < Size * Size; ++i)
+		{
+			FMemory::Memcpy(Pixels.GetData() + i * 4, Texel, 4);
+		}
+		break;
+	}
+	default:  // Color: white for FuzzColor, mid-gray sRGB otherwise
+	{
+		const uint8 C = FCString::Strcmp(Suffix, TEXT("FuzzColor")) == 0 ? 255 : 128;
+		const uint8 Texel[4] = { C, C, C, 255 };
 		Pixels.SetNumUninitialized(Size * Size * 4);
 		for (int32 i = 0; i < Size * Size; ++i)
 		{
@@ -1214,6 +1309,32 @@ static FLinearColor DecodeAqueductNormal(const FLinearColor& Encoded, int32 Norm
 	return FLinearColor(Normal.X, Normal.Y, Normal.Z, Encoded.A);
 }
 
+static FLinearColor DecodeAqueductTangent(const FLinearColor& Encoded)
+{
+	// Encoded is OpenPBR/Aqueduct 0.5 + 0.5 * (tx, ty) in R, G (+Y = up).
+	// Negate Y when writing UE tangent space because Unreal's bitangent follows +V (down).
+	const float R = FMath::IsFinite(Encoded.R) ? Encoded.R : 1.0f;
+	const float G = FMath::IsFinite(Encoded.G) ? Encoded.G : 0.5f;
+	const FVector2f Raw(R * 2.0f - 1.0f, G * 2.0f - 1.0f);
+	const float Len = Raw.Size();
+	const FVector2f Dir = (FMath::IsFinite(Len) && Len > 1e-5f) ? (Raw / Len) : FVector2f(1.0f, 0.0f);
+	return FLinearColor(Dir.X, -Dir.Y, 0.0f, 1.0f);
+}
+
+static FLinearColor DecodeAqueductColorClamped(const FLinearColor& Encoded, const FLinearColor& Fallback)
+{
+	auto Ch = [](float V, float Def) -> float
+	{
+		return FMath::IsFinite(V) ? AqueductSrgbToLinear(FMath::Clamp(V, 0.0f, 1.0f)) : Def;
+	};
+	return FLinearColor(Ch(Encoded.R, Fallback.R), Ch(Encoded.G, Fallback.G), Ch(Encoded.B, Fallback.B), 1.0f);
+}
+
+static float ClampUnitScalar(float Value, float Fallback)
+{
+	return FMath::IsFinite(Value) ? FMath::Clamp(Value, 0.0f, 1.0f) : Fallback;
+}
+
 static void ApplyOutputBindingsToMIC(
 	const TSharedPtr<FJsonObject>& Outputs, int32 NormalFormat, UMaterialInstanceConstant* MIC)
 {
@@ -1233,6 +1354,14 @@ static void ApplyOutputBindingsToMIC(
 		Outputs, {TEXT("emissive")}, FLinearColor::Black);
 	const FResolvedOutputBinding Luminance = ResolveScalarBinding(
 		Outputs, {TEXT("emission_luminance")}, 100.0f);
+	const FResolvedOutputBinding FuzzWeight = ResolveScalarBinding(
+		Outputs, {TEXT("fuzz_weight")}, 0.0f);
+	const FResolvedOutputBinding FuzzColor = ResolveVectorBinding(
+		Outputs, {TEXT("fuzz_color")}, FLinearColor::White);
+	const FResolvedOutputBinding Aniso = ResolveScalarBinding(
+		Outputs, {TEXT("anisotropy")}, 0.0f);
+	const FResolvedOutputBinding Tangent = ResolveVectorBinding(
+		Outputs, {TEXT("tangent")}, FLinearColor(1.0f, 0.5f, 0.5f, 1.0f));
 	if (Emissive.bExplicit || Luminance.bExplicit)
 	{
 		static bool bWarnedLegacyExposure = false;
@@ -1266,11 +1395,27 @@ static void ApplyOutputBindingsToMIC(
 	SetScalar(TEXT("MetallicUseTexture"), Metallic.bTexture ? 1.0f : 0.0f);
 	SetScalar(TEXT("AoConstant"), Ao.Scalar);
 	SetScalar(TEXT("AoUseTexture"), Ao.bTexture ? 1.0f : 0.0f);
-	SetScalar(TEXT("OpacityConstant"), FMath::IsFinite(Opacity.Scalar) ? FMath::Clamp(Opacity.Scalar, 0.0f, 1.0f) : 1.0f);
+	SetScalar(TEXT("OpacityConstant"), ClampUnitScalar(Opacity.Scalar, 1.0f));
 	SetScalar(TEXT("OpacityUseTexture"), Opacity.bTexture ? 1.0f : 0.0f);
 	SetVector(TEXT("EmissiveConstant"), DecodeAqueductColor(Emissive.Vector));
 	SetScalar(TEXT("EmissiveUseTexture"), Emissive.bTexture ? 1.0f : 0.0f);
 	SetScalar(TEXT("EmissionLuminanceNits"), Luminance.Scalar);
+	// Fuzz and anisotropy parameters exist only on the parents that shade
+	// them; other instances carry no overrides for them.
+	float ExistingScalar = 0.0f;
+	if (MIC->GetScalarParameterValue(FHashedMaterialParameterInfo(FName("FuzzWeightConstant")), ExistingScalar))
+	{
+		SetVector(TEXT("FuzzColorConstant"), DecodeAqueductColorClamped(FuzzColor.Vector, FLinearColor::White));
+		SetScalar(TEXT("FuzzColorUseTexture"), FuzzColor.bTexture ? 1.0f : 0.0f);
+		SetScalar(TEXT("FuzzWeightConstant"), ClampUnitScalar(FuzzWeight.Scalar, 0.0f));
+		SetScalar(TEXT("FuzzWeightUseTexture"), FuzzWeight.bTexture ? 1.0f : 0.0f);
+	}
+	if (MIC->GetScalarParameterValue(FHashedMaterialParameterInfo(FName("AnisotropyConstant")), ExistingScalar))
+	{
+		SetScalar(TEXT("AnisotropyConstant"), ClampUnitScalar(Aniso.Scalar, 0.0f));
+		SetVector(TEXT("TangentConstant"), DecodeAqueductTangent(Tangent.Vector));
+		SetScalar(TEXT("AnisotropyUseTexture"), (Aniso.bTexture || Tangent.bTexture) ? 1.0f : 0.0f);
+	}
 	MIC->MarkPackageDirty();
 }
 
@@ -1300,9 +1445,12 @@ static TExpression* AddMaterialExpression(UMaterial* Mat, int32 X, int32 Y)
 /** Add or repair the Aqueduct-owned material interface without replacing the
  *  material asset or its instances. The schema marker makes the operation
  *  idempotent; only the exact owned material calls this function. */
-static bool ReconcileAqueductBaseMaterial(UMaterial* Mat, UMaterialExpressionMultiply* TilingMul)
+static bool ReconcileAqueductBaseMaterial(
+	UMaterial* Mat, UMaterialExpressionMultiply* TilingMul, const FAqueductParentDef& Def)
 {
-	constexpr float SchemaVersion = 3.0f;
+	// The plain parents keep schema 3. Parents that shade fuzz or anisotropy
+	// carry their own, newer graph revision.
+	const float SchemaVersion = (Def.bFuzz || Def.bAnisotropy) ? 7.0f : 3.0f;
 	UMaterialExpressionScalarParameter* ExistingSchema =
 		FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("AqueductSchemaVersion"));
 	const bool bRequiredParametersPresent =
@@ -1323,10 +1471,34 @@ static bool ReconcileAqueductBaseMaterial(UMaterial* Mat, UMaterialExpressionMul
 		&& FindParameterExpression<UMaterialExpressionVectorParameter>(Mat, FName("EmissiveConstant"))
 		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("EmissiveUseTexture"))
 		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("EmissionLuminanceNits"));
-	const UMaterialEditorOnlyData* ExistingEditorData = Mat->GetEditorOnlyData();
+	const bool bFuzzParametersPresent =
+		FindParameterExpression<UMaterialExpressionVectorParameter>(Mat, FName("FuzzColorConstant"))
+		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("FuzzColorUseTexture"))
+		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("FuzzWeightConstant"))
+		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("FuzzWeightUseTexture"));
+	const bool bAnisotropyParametersPresent =
+		FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("AnisotropyConstant"))
+		&& FindParameterExpression<UMaterialExpressionVectorParameter>(Mat, FName("TangentConstant"))
+		&& FindParameterExpression<UMaterialExpressionScalarParameter>(Mat, FName("AnisotropyUseTexture"));
+	UMaterialEditorOnlyData* ExistingEditorData = Mat->GetEditorOnlyData();
+	// A parent's fuzz and anisotropy inputs are connected exactly when it
+	// shades that feature.
+	const bool bFuzzWired = ExistingEditorData
+		&& ExistingEditorData->SubsurfaceColor.Expression && ExistingEditorData->ClearCoat.Expression;
+	const bool bFuzzUnwired = ExistingEditorData
+		&& !ExistingEditorData->SubsurfaceColor.Expression && !ExistingEditorData->ClearCoat.Expression;
+	const bool bAnisotropyWired = ExistingEditorData
+		&& ExistingEditorData->Anisotropy.Expression && ExistingEditorData->Tangent.Expression;
+	const bool bAnisotropyUnwired = ExistingEditorData
+		&& !ExistingEditorData->Anisotropy.Expression && !ExistingEditorData->Tangent.Expression;
+	const bool bShadingModelWiringMatches = ExistingEditorData
+		&& ExistingEditorData->ShadingModelFromMaterialExpression.Expression == nullptr;
 	if (ExistingSchema && ExistingSchema->DefaultValue >= SchemaVersion
 		&& bRequiredParametersPresent && ExistingEditorData
-		&& ExistingEditorData->EmissiveColor.Expression && ExistingEditorData->Opacity.Expression)
+		&& ExistingEditorData->EmissiveColor.Expression && ExistingEditorData->Opacity.Expression
+		&& bShadingModelWiringMatches
+		&& (Def.bFuzz ? (bFuzzParametersPresent && bFuzzWired) : bFuzzUnwired)
+		&& (Def.bAnisotropy ? (bAnisotropyParametersPresent && bAnisotropyWired) : bAnisotropyUnwired))
 	{
 		return false;
 	}
@@ -1420,13 +1592,88 @@ static bool ReconcileAqueductBaseMaterial(UMaterial* Mat, UMaterialExpressionMul
 	Emission->A.Connect(0, EmissiveNonnegative);
 	Emission->B.Connect(0, LuminanceNonnegative);
 
+	auto Clamp01 = [Mat](UMaterialExpression* InputExpr, int32 X, int32 Y)
+	{
+		auto* ClampExpr = AddMaterialExpression<UMaterialExpressionClamp>(Mat, X, Y);
+		ClampExpr->Input.Connect(0, InputExpr);
+		ClampExpr->MinDefault = 0.0f;
+		ClampExpr->MaxDefault = 1.0f;
+		return ClampExpr;
+	};
 	auto* OpacityTexture = EnsureTexture(TEXT("Opacity"), SAMPLERTYPE_LinearGrayscale, EAqueductMapKind::Gray, 950);
 	auto* Opacity = Lerp(Scalar(TEXT("OpacityConstant"), 1.0f, 950), 0, OpacityTexture, 1,
 		Scalar(TEXT("OpacityUseTexture"), 0.0f, 990), 950);
-	auto* OpacityClamped = AddMaterialExpression<UMaterialExpressionClamp>(Mat, 260, 950);
-	OpacityClamped->Input.Connect(0, Opacity);
-	OpacityClamped->MinDefault = 0.0f;
-	OpacityClamped->MaxDefault = 1.0f;
+	auto* OpacityClamped = Clamp01(Opacity, 260, 950);
+
+	UMaterialExpression* FuzzColorClamped = nullptr;
+	UMaterialExpression* FuzzWeightClamped = nullptr;
+	if (Def.bFuzz)
+	{
+		auto* FuzzColorTexture = EnsureTexture(TEXT("FuzzColor"), SAMPLERTYPE_Color, EAqueductMapKind::Color, 1080);
+		auto* FuzzColor = Lerp(Vector(TEXT("FuzzColorConstant"), FLinearColor::White, 1080), 0,
+			FuzzColorTexture, 0, Scalar(TEXT("FuzzColorUseTexture"), 0.0f, 1120), 1080);
+		FuzzColorClamped = Clamp01(FuzzColor, 260, 1080);
+
+		auto* FuzzWeightTexture = EnsureTexture(TEXT("FuzzWeight"), SAMPLERTYPE_LinearGrayscale, EAqueductMapKind::Gray, 1200);
+		auto* FuzzWeight = Lerp(Scalar(TEXT("FuzzWeightConstant"), 0.0f, 1200), 0,
+			FuzzWeightTexture, 1, Scalar(TEXT("FuzzWeightUseTexture"), 0.0f, 1240), 1200);
+		FuzzWeightClamped = Clamp01(FuzzWeight, 260, 1200);
+	}
+
+	UMaterialExpression* AnisoClamped = nullptr;
+	UMaterialExpression* TangentTS = nullptr;
+	if (Def.bAnisotropy)
+	{
+		auto* AnisotropyTexture = EnsureTexture(TEXT("Anisotropy"), SAMPLERTYPE_LinearColor, EAqueductMapKind::Anisotropy, 1340);
+		UMaterialExpressionCustom* DecodeAniso = nullptr;
+		for (UMaterialExpression* Expr : Mat->GetExpressions())
+		{
+			if (auto* Custom = Cast<UMaterialExpressionCustom>(Expr))
+			{
+				if (Custom->Description == TEXT("AqueductDecodeAnisotropy"))
+				{
+					DecodeAniso = Custom;
+					break;
+				}
+			}
+		}
+		if (!DecodeAniso)
+		{
+			DecodeAniso = AddMaterialExpression<UMaterialExpressionCustom>(Mat, -150, 1340);
+			DecodeAniso->Description = TEXT("AqueductDecodeAnisotropy");
+		}
+		DecodeAniso->OutputType = CMOT_Float1;
+		DecodeAniso->Inputs.SetNum(1);
+		DecodeAniso->Inputs[0].InputName = FName("PackedRG");
+		DecodeAniso->Inputs[0].Input.Connect(0, AnisotropyTexture);
+		DecodeAniso->AdditionalOutputs.SetNum(1);
+		DecodeAniso->AdditionalOutputs[0].OutputName = FName("OutTangentTS");
+		DecodeAniso->AdditionalOutputs[0].OutputType = CMOT_Float3;
+		DecodeAniso->RebuildOutputs();
+		DecodeAniso->Code = TEXT(
+			"float2 uw = (PackedRG.rg * 255.0f - 128.0f) / 127.0f;\n"
+			"float len = length(uw);\n"
+			"if (len > 1e-5f)\n"
+			"{\n"
+			"    float2 d2 = uw / len;\n"
+			"    float tx = sqrt(max(0.5f * (1.0f + d2.x), 0.0f));\n"
+			"    float ty = (d2.y >= 0.0f ? 1.0f : -1.0f) * sqrt(max(0.5f * (1.0f - d2.x), 0.0f));\n"
+			"    OutTangentTS = float3(tx, -ty, 0.0f);\n"
+			"}\n"
+			"else\n"
+			"{\n"
+			"    OutTangentTS = float3(1.0f, 0.0f, 0.0f);\n"
+			"}\n"
+			"return saturate(len);\n");
+
+		auto* AnisoUseTex = Scalar(TEXT("AnisotropyUseTexture"), 0.0f, 1460);
+		auto* Aniso = Lerp(Scalar(TEXT("AnisotropyConstant"), 0.0f, 1340), 0, DecodeAniso, 0, AnisoUseTex, 1340);
+		AnisoClamped = Clamp01(Aniso, 260, 1340);
+		// bTangentSpaceNormal defaults to true, so UE auto-transforms MP_Tangent to world space.
+		TangentTS = Lerp(Vector(TEXT("TangentConstant"), FLinearColor(1.0f, 0.0f, 0.0f, 1.0f), 1400), 0,
+			DecodeAniso, 1, AnisoUseTex, 1420);
+	}
+
 	auto* Schema = Scalar(TEXT("AqueductSchemaVersion"), SchemaVersion, 850);
 	Schema->DefaultValue = SchemaVersion;
 
@@ -1439,25 +1686,60 @@ static bool ReconcileAqueductBaseMaterial(UMaterial* Mat, UMaterialExpressionMul
 		EditorData->Metallic.Connect(0, Metallic);
 		EditorData->EmissiveColor.Connect(0, Emission);
 		EditorData->Opacity.Connect(0, OpacityClamped);
+		EditorData->ShadingModelFromMaterialExpression.Expression = nullptr;
+		if (Def.bFuzz)
+		{
+			EditorData->SubsurfaceColor.Connect(0, FuzzColorClamped);
+			// MP_CustomData0 is stored in EditorData->ClearCoat (labeled "Cloth" on MSM_Cloth).
+			EditorData->ClearCoat.Connect(0, FuzzWeightClamped);
+		}
+		else
+		{
+			EditorData->SubsurfaceColor.Expression = nullptr;
+			EditorData->ClearCoat.Expression = nullptr;
+		}
+		if (Def.bAnisotropy)
+		{
+			EditorData->Anisotropy.Connect(0, AnisoClamped);
+			EditorData->Tangent.Connect(0, TangentTS);
+		}
+		else
+		{
+			EditorData->Anisotropy.Expression = nullptr;
+			EditorData->Tangent.Expression = nullptr;
+		}
 	}
 	return true;
 }
 
-UMaterial* FAqueductMaterialManager::GetOrCreateBaseMaterial(bool bTranslucent)
+UMaterial* FAqueductMaterialManager::GetOrCreateBaseMaterial(EAqueductParentKind ParentKind)
 {
-	UMaterial*& CachedMaterial = bTranslucent ? TranslucentMaterial : BaseMaterial;
+	static_assert(UE_ARRAY_COUNT(GParentDefs) == static_cast<int32>(EAqueductParentKind::Count),
+		"GParentDefs must have one entry per EAqueductParentKind");
+	const FAqueductParentDef& Def = GParentDefs[static_cast<int32>(ParentKind)];
+	UMaterial*& CachedMaterial = ParentMaterials[static_cast<int32>(ParentKind)];
 	if (CachedMaterial) return CachedMaterial;
-	const TCHAR* MaterialPath = bTranslucent ? GTranslucentMaterialPath : GBaseMaterialPath;
+	const TCHAR* MaterialPath = Def.PackagePath;
+	const TCHAR* AssetName = Def.AssetName;
+	const EMaterialShadingModel DesiredShading = Def.ShadingModel;
 
 	UMaterial* Mat = LoadObject<UMaterial>(nullptr, MaterialPath);
 	if (Mat)
 	{
+		bool bChanged = false;
+		const bool bShadingMatches = !Mat->IsShadingModelFromMaterialExpression()
+			&& Mat->GetShadingModels().HasOnlyShadingModel(DesiredShading);
+		if (!bShadingMatches)
+		{
+			Mat->SetShadingModel(DesiredShading);
+			bChanged = true;
+		}
 		auto* BaseTexture = FindParameterExpression<UMaterialExpressionTextureSampleParameter2D>(
 			Mat, FName("BaseColor"));
 		auto* ExistingTiling = BaseTexture
 			? Cast<UMaterialExpressionMultiply>(BaseTexture->Coordinates.Expression)
 			: nullptr;
-		if (ReconcileAqueductBaseMaterial(Mat, ExistingTiling))
+		if (ReconcileAqueductBaseMaterial(Mat, ExistingTiling, Def) || bChanged)
 		{
 			Mat->PreEditChange(nullptr);
 			Mat->PostEditChange();
@@ -1476,12 +1758,13 @@ UMaterial* FAqueductMaterialManager::GetOrCreateBaseMaterial(bool bTranslucent)
 	if (!Pkg) return nullptr;
 	Pkg->FullyLoad();
 
-	Mat = NewObject<UMaterial>(Pkg, bTranslucent ? TEXT("M_Aqueduct_Translucent") : TEXT("M_Aqueduct_Base"), RF_Public | RF_Standalone);
+	const bool bTranslucent = Def.bTranslucent;
+	Mat = NewObject<UMaterial>(Pkg, AssetName, RF_Public | RF_Standalone);
 	Mat->MaterialDomain = MD_Surface;
 	Mat->BlendMode = bTranslucent ? BLEND_Translucent : BLEND_Opaque;
 	Mat->TranslucencyLightingMode = TLM_SurfacePerPixelLighting;
 	Mat->TwoSided = bTranslucent;
-	Mat->SetShadingModel(MSM_DefaultLit);
+	Mat->SetShadingModel(DesiredShading);
 
 	// Tiling: TexCoord × scalar parameter → shared UVs for all samplers
 	auto* TexCoord = NewObject<UMaterialExpressionTextureCoordinate>(Mat);
@@ -1546,7 +1829,7 @@ UMaterial* FAqueductMaterialManager::GetOrCreateBaseMaterial(bool bTranslucent)
 		EditorData->Roughness.Connect(2, OrmParam);         // G
 		EditorData->Metallic.Connect(3, OrmParam);          // B
 	}
-	ReconcileAqueductBaseMaterial(Mat, TilingMul);
+	ReconcileAqueductBaseMaterial(Mat, TilingMul, Def);
 
 	Mat->PreEditChange(nullptr);
 	Mat->PostEditChange();
@@ -1686,6 +1969,8 @@ FAqueductMaterialManager::BuildDeliverySet(UE::Aqueduct::FAqueductGraphExecutor*
 
 	bool bAnyOrm = false;
 	uint32 OrmResolution = 0;
+	bool bAnyAniso = false;
+	uint32 AnisoResolution = 0;
 	for (const auto& Pair : Outputs)
 	{
 		if (!Pair.Value.IsValid()) continue;
@@ -1693,6 +1978,12 @@ FAqueductMaterialManager::BuildDeliverySet(UE::Aqueduct::FAqueductGraphExecutor*
 		{
 			bAnyOrm = true;
 			OrmResolution = Pair.Value->GetSizeX();
+			continue;
+		}
+		if (IsAnisotropyComponentOutput(Pair.Key))
+		{
+			bAnyAniso = true;
+			AnisoResolution = Pair.Value->GetSizeX();
 			continue;
 		}
 		FDeliveryDesc& D = Deliveries.AddDefaulted_GetRef();
@@ -1715,6 +2006,20 @@ FAqueductMaterialManager::BuildDeliverySet(UE::Aqueduct::FAqueductGraphExecutor*
 		}
 		D.CombinedHash = DeliveryHashFor(OrmDeliveryName(), OutputHashes);
 		D.Resolution = OrmResolution;
+	}
+
+	if (bAnyAniso)
+	{
+		FDeliveryDesc& D = Deliveries.AddDefaulted_GetRef();
+		D.Name = AnisotropyDeliveryName();
+		D.Kind = EAqueductMapKind::Anisotropy;
+		const TCHAR* const* Components = AnisotropyComponentOutputs();
+		for (int32 i = 0; i < 2; ++i)
+		{
+			if (Outputs.Contains(Components[i])) D.OutputNames.Add(Components[i]);
+		}
+		D.CombinedHash = DeliveryHashFor(AnisotropyDeliveryName(), OutputHashes);
+		D.Resolution = AnisoResolution;
 	}
 
 	return Deliveries;
@@ -1928,6 +2233,17 @@ void FAqueductMaterialManager::CopyOutputsToTextures(
 				bAny |= T.OrmSrc[i].IsValid();
 			}
 			if (!bAny) continue;
+		}
+		else if (TexPair.Key == AnisotropyDeliveryName())
+		{
+			T.Kind = EAqueductMapKind::Anisotropy;
+			const TCHAR* const* Components = AnisotropyComponentOutputs();
+			T.AnisoSrc[0] = Outputs.FindRef(Components[0]);
+			T.AnisoSrc[1] = Outputs.FindRef(Components[1]);
+			T.AnisotropyDefault = State->CachedAnisoConstants.Anisotropy;
+			T.TangentDefault = State->CachedAnisoConstants.TangentDir;
+			SizeSrc = T.AnisoSrc[0].IsValid() ? T.AnisoSrc[0] : T.AnisoSrc[1];
+			if (!SizeSrc.IsValid()) continue;
 		}
 		else
 		{
@@ -2294,6 +2610,8 @@ void FAqueductMaterialManager::PromoteToLive(const FString& GraphFilePath)
 	EnsureOutputTextureAssets(GraphFilePath, Executor.Get(), MIC);
 	State = GraphStates.Find(GraphFilePath);
 	if (!State) return;
+	State->CachedAnisoConstants = AqueductTextureWriter::ResolveAnisotropyConstantsFromBindingsJson(
+		Executor->GetOutputBindingsJson());
 	CopyOutputsToTextures(GraphFilePath, Executor.Get());
 	InvalidateViewportsForChangedPixels();
 

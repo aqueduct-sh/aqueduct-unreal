@@ -27,9 +27,10 @@ ETextureSourceFormat SourceFormatForKind(EAqueductMapKind Kind)
 {
 	switch (Kind)
 	{
-	case EAqueductMapKind::Normal: return TSF_RGBA16;
-	case EAqueductMapKind::Gray:   return TSF_G8;
-	default:                       return TSF_BGRA8;  // Color, Orm
+	case EAqueductMapKind::Normal:     return TSF_RGBA16;
+	case EAqueductMapKind::Gray:       return TSF_G8;
+	case EAqueductMapKind::Anisotropy: return TSF_BGRA8;
+	default:                           return TSF_BGRA8;  // Color, Orm
 	}
 }
 
@@ -66,6 +67,16 @@ void ApplyDeliverySettings(UTexture2D* Texture, EAqueductMapKind Kind, bool bDyn
 		Texture->CompressionSettings = TC_BC7;
 		Texture->SRGB = false;
 		Texture->LODGroup = TEXTUREGROUP_World;
+		break;
+	case EAqueductMapKind::Anisotropy:
+		// BC7 (linear): coupled double-angle vector uw in RG (0.5 + 0.5 * uw).
+		// Never renormalize mips so shortened vector length encodes variance.
+		Texture->CompressionSettings = TC_BC7;
+		Texture->SRGB = false;
+		Texture->LODGroup = TEXTUREGROUP_World;
+#if WITH_EDITORONLY_DATA
+		Texture->bNormalizeNormals = false;
+#endif
 		break;
 	case EAqueductMapKind::Normal:
 		// BC5: two independently-interpolated channels (X/Y); the sampler
