@@ -13,8 +13,6 @@ namespace
 	constexpr const TCHAR* AssetUrlPrefixes[] = {
 		TEXT("https://storage.aqueduct.sh/assets/"),
 		TEXT("https://storage-dev.aqueduct.sh/assets/"),
-		TEXT("https://storage.iliad.ai/assets/"),
-		TEXT("https://storage-dev.iliad.ai/assets/"),
 	};
 
 	bool IsLowerHex64(const FString& S)

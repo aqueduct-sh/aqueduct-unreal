@@ -26,8 +26,8 @@ namespace AqueductAssets
 
 	/**
 	 * Parse a whitelisted asset URL. Only our storage domains are valid:
-	 * storage.aqueduct.sh, storage-dev.aqueduct.sh, storage.iliad.ai, or
-	 * storage-dev.iliad.ai, followed by /assets/<64 lowercase hex>.<png|exr>.
+	 * storage.aqueduct.sh or storage-dev.aqueduct.sh, followed by
+	 * /assets/<64 lowercase hex>.<png|exr>.
 	 */
 	AQUEDUCTRUNTIME_API bool ParseAssetUrl(const FString& Url, FString& OutHash, FString& OutExtension);
 

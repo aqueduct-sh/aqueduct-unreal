@@ -13,7 +13,7 @@ class FRHIGPUTextureReadback;
 struct FFileChangeData;
 
 /**
- * Manages materials for all Iliad graphs.
+ * Manages materials for all Aqueduct graphs.
  *
  * Owns the base material, per-graph Material Instance Constants,
  * UAqueductTexture output assets, executors, the animation ticker, and the
@@ -79,7 +79,7 @@ public:
 	 * UAqueductGraph wrapper asset. Animated graphs bake their t=0 frame.
 	 *
 	 * Bakes are LAZY: this runs only (a) from the pre-save hook when a
-	 * stale Iliad texture is about to be saved — i.e. inside Ctrl+S /
+	 * stale Aqueduct texture is about to be saved — i.e. inside Ctrl+S /
 	 * Save All / the exit prompt, operations that already block by user
 	 * intent; (b) from the startup hash guard; (c) explicitly in
 	 * unattended runs (tests, automation). Editing sessions themselves
@@ -331,7 +331,7 @@ private:
 	FTSTicker::FDelegateHandle TickerHandle;
 	bool bInitialized = false;
 
-	/** Pre-save hook: a stale Iliad texture is about to be serialized —
+	/** Pre-save hook: a stale Aqueduct texture is about to be serialized —
 	 *  bake its graph first so the user never saves stale pixels. This is
 	 *  the ONLY interactive bake trigger. */
 	void OnObjectPreSave(UObject* Object, class FObjectPreSaveContext SaveContext);

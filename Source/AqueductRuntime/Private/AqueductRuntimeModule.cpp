@@ -27,7 +27,7 @@ namespace UE::Aqueduct
  */
 static void RegisterAnimatedGraphShadersForCook()
 {
-	const FString IliadDir = FPaths::ConvertRelativePathToFull(
+	const FString AqueductDir = FPaths::ConvertRelativePathToFull(
 		FPaths::Combine(FPaths::ProjectContentDir(), TEXT("Aqueduct")));
 	// Graphs live in per-graph subfolders
 	// (Content/Aqueduct/<name>/<name>.aqueduct), so scan recursively. A
@@ -35,7 +35,7 @@ static void RegisterAnimatedGraphShadersForCook()
 	// permutations never get registered for cook — the graph would silently
 	// fail to animate in a shipped game. FindFilesRecursive returns full paths.
 	TArray<FString> GraphFiles;
-	IFileManager::Get().FindFilesRecursive(GraphFiles, *IliadDir, TEXT("*.aqueduct"), true, false);
+	IFileManager::Get().FindFilesRecursive(GraphFiles, *AqueductDir, TEXT("*.aqueduct"), true, false);
 	if (GraphFiles.Num() == 0) return;
 
 	const FString RegistryToml = AqueductNodeAssets::BuiltinRegistryToml();

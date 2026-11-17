@@ -1,11 +1,11 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "0.1.15",
+	"VersionName": "0.1.16",
 	"FriendlyName": "Aqueduct",
 	"Description": "Procedural material engine. Live-linked to the Aqueduct editor.",
 	"Category": "Textures",
-	"CreatedBy": "Iliad",
+	"CreatedBy": "Aqueduct",
 	"EnabledByDefault": false,
 	"CanContainContent": false,
 	"Plugins": [

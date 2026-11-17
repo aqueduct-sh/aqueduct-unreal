@@ -1,5 +1,5 @@
 // Aqueduct Editor module: material and asset management.
-// Contains NO graph editing UI; the only graph editor is the Iliad web app.
+// Contains NO graph editing UI; the only graph editor is the Aqueduct web app.
 //
 // The C++ here is unstable internals with no supported API; the product
 // surface is assets, materials, and the live link.

@@ -407,13 +407,13 @@ void FAqueductMaterialManager::EnsureInitialized()
 		TEXT("AssetRegistry")).Get().OnAssetRemoved().AddRaw(
 		this, &FAqueductMaterialManager::OnWrapperAssetRemoved);
 
-	FString IliadDir = FPaths::ConvertRelativePathToFull(
+	FString AqueductDir = FPaths::ConvertRelativePathToFull(
 		FPaths::Combine(FPaths::ProjectContentDir(), TEXT("Aqueduct")));
 	// Recursive: graphs live in per-graph subfolders (legacy root-level
 	// recipes are found the same way and keep their flat layout).
 	TArray<FString> GraphFiles;
 	IFileManager::Get().FindFilesRecursive(
-		GraphFiles, *IliadDir, TEXT("*.aqueduct"), /*Files=*/true, /*Directories=*/false);
+		GraphFiles, *AqueductDir, TEXT("*.aqueduct"), /*Files=*/true, /*Directories=*/false);
 
 	for (const FString& FileName : GraphFiles)
 	{
@@ -480,7 +480,7 @@ void FAqueductMaterialManager::EnsureInitialized()
 		ReloadGraphFromFile(FullPath);
 	}
 
-	WatchDirectory(IliadDir);
+	WatchDirectory(AqueductDir);
 }
 
 void FAqueductMaterialManager::Shutdown()
